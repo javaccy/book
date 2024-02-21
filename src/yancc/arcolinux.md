@@ -325,6 +325,11 @@ wget https://github.com/medcl/elasticsearch-analysis-ik/releases/download/v6.8.6
 podman cp ./elasticsearch-analysis-ik-6.8.6.zip elasticsearch:/usr/share/elasticsearch/elasticsearch-analysis-ik-6.8.6.zip
 podman exec -it -w /usr/share/elasticsearch elasticsearch sh -c '/usr/share/elasticsearch/bin/elasticsearch-plugin install file:///usr/share/elasticsearch/elasticsearch-analysis-ik-6.8.6.zip'
 
+###  podman/docker 创建influxdb
+
+podman stop influxdb2.7.4 && podman rm influxdb2.7.4 && podman run -d --name influxdb2.7.4 -p 8086:8086 -e DOCKER_INFLUXDB_INIT_USERNAME=admin -e DOCKER_INFLUXDB_INIT_PASSWORD=12345678 -e DOCKER_INFLUXDB_INIT_ORG=yancc-org -e DOCKER_INFLUXDB_INIT_BUCKET=yancc-bucket influxdb
+:2.7.4
+
 
 ## 修改glava配置
 yay -S glava
