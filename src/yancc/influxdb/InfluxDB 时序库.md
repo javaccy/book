@@ -1,4 +1,5 @@
 # Influxdb 数据库我的笔记
+## [InfluxDB官方文档](https://docs.influxdata.com/influxdb/v2/)
 
 ## 常用命令说明
 
@@ -328,46 +329,46 @@ insert test,person_name=xiaohei age=31,name="xiaohei",address="nanning";
   - `注意事项：聚合函数只能对field字段进行操作，不能对tag字段操作，否则查询出来的列表是空的`
 
 ```sql
-0、如果我就要对tag字段进行聚合函数计算怎么办？ 那我们可以通过子查询来实现：
-- select distinct(person_name) from (select * from test);
+-- 0、如果我就要对tag字段进行聚合函数计算怎么办？ 那我们可以通过子查询来实现：
+ select distinct(person_name) from (select * from test);
 
-1、count() 统计
+-- 1、count() 统计
 # 查询某个field字段的中的非空值数量 
-- select count(age) from test;
+select count(age) from test;
 
-2、DISTINCT() 去重
-- select distinct(age) from test;
+-- 2、DISTINCT() 去重
+select distinct(age) from test;
 
-3、MEAN() 求平均值，这个平均值必须是数字类型
-- select mean(age) from test;
+-- 3、MEAN() 求平均值，这个平均值必须是数字类型
+select mean(age) from test;
 
-4、MEDIAN() 求中位数，从单个字段（field）中的排序值返回中间值
+-- 4、MEDIAN() 求中位数，从单个字段（field）中的排序值返回中间值
 # 中位数统计学中的专有名词，是按顺序排列的一组数据中居于中间位置的数，代表一个样本、种群或概率分布中的一个数值，其可将数值集合划分为相等的上下两部分。
-- select median(age) from test;
+select median(age) from test;
 
-5、SPREAD() 返回字段的最小值和最大值之间的差值。数据的类型必须是长整型或float64
-- select spread(age) from test;
+-- 5、SPREAD() 返回字段的最小值和最大值之间的差值。数据的类型必须是长整型或float64
+select spread(age) from test;
 
-6、SUM() 求和
-- select sum(age) from test;
+-- 6、SUM() 求和
+select sum(age) from test;
 
-7、BOTTOM() 返回一个字段中最小的N个值。字段类型必须是长整型或float64类型。
-- select bottom(age,3) from test;
+-- 7、BOTTOM() 返回一个字段中最小的N个值。字段类型必须是长整型或float64类型。
+select bottom(age,3) from test;
 
-8、FIRST() 返回一个字段中时间最早取值
-- select first(age) from test;
+-- 8、FIRST() 返回一个字段中时间最早取值
+select first(age) from test;
 
-9、LAST() 返回一个字段中时间最晚取值。
-- select last(age) from test
+-- 9、LAST() 返回一个字段中时间最晚取值。
+select last(age) from test
 
-10、MAX() 求最大值
-- select max(age) from test
+-- 10、MAX() 求最大值
+select max(age) from test
 ```
 
 - **分组聚合**
 
 ```sql
-1、基于时间分组
+-- 1、基于时间分组
 # 查询所有数据，并对其划分为每200毫秒一组
 select count(age) from test   group by time(200ms) 
 # 查询所有数据，并对其划分为每200秒一组
@@ -385,25 +386,25 @@ select count(age) from test   group by time(12w)
 - **分页查询**
 
 ```sql
-LIMIT 用法有2种:
-	1. limit 10：查询前10条数据
-  2. limit size offset N： size表示每页 大小，N表示第几条记录开始查询
+-- LIMIT 用法有2种:
+--  1. limit 10：查询前10条数据
+--  2. limit size offset N： size表示每页 大小，N表示第几条记录开始查询
   
 # 查询前10条数据
-- select * from test limit 10
+ select * from test limit 10
 # 分页，pageSize 为每页显示大小， pageIndex 为查询的页数
- pageIndex = 1
- pageSize = 10
-- select * from test limit pageSize offset (pageIndex-1)*pageSize
+-- pageIndex = 1
+-- pageSize = 10
+select * from test limit pageSize offset (pageIndex-1)*pageSize
 ```
 
-- **排序**
+**排序**
 
 ```sql
 # 升序
-select * from test order by time asc
+select * from test order by time asc;
 # 降序
-select * from test order by time desc
+select * from test order by time desc;
 ```
 
 - **in 查询**
