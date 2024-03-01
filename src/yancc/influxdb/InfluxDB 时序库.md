@@ -1247,3 +1247,56 @@ Influxdb为了优化这个问题，在做compact时分为optimize compact和full
 
 ---
 
+
+# InfluxDB 2.x 主从数据同步
+
+```shell
+# 1. Local创建remote-id
+influx remote create 
+  --name bandu_test_remote  // remote 名称
+  --host http://127.0.0.1:8086 // 本地的influxdb 地址
+  --org bandu  // 本地 org 名称
+  --remote-url http://192.168.11.22:8086 // 远程 influxdb地址
+  --remote-api-token SMLATecmB0DlNO // 远程 influxdb token
+  --remote-org-id 8eaa43xxxxx62821 // 远程org 的id
+# 2.创建同步策略-replication
+
+influx replication create 
+  --name bandu_test // replication 名称
+  --org bandu  // 本地 org 名称
+  --remote-id 0ba239fbfxxx3000   // 上一步创建的 remote-id
+  --local-bucket-id 9ae5049xxxac8a01  // 本地 bucket-id
+  --remote-bucket-id f3ba1e7ddexxxxc8 // 远程 bucket-id
+  
+  
+#  本地测试
+# 创建主节点
+podman stop influxdb2.3.0-master && podman rm influxdb2.3.0-master && podman run -d --network podman --name influxdb2.3.0-master -p 8087:8086 -e DOCKER_INFLUXDB_INIT_USERNAME=admin -e DOCKER_INFLUXDB_INIT_PASSWORD=12345678 -e DOCKER_INFLUXDB_INIT_ORG=yancc-org -e DOCKER_INFLUXDB_INIT_BUCKET=yancc-bucket influxdb:2.3.0
+podman stop influxdb2.3.0-slave1 && podman rm influxdb2.3.0-slave1 && podman run -d --network podman --name influxdb2.3.0-slave1 -p 8088:8086 -e DOCKER_INFLUXDB_INIT_USERNAME=admin -e DOCKER_INFLUXDB_INIT_PASSWORD=12345678 -e DOCKER_INFLUXDB_INIT_ORG=yancc-org -e DOCKER_INFLUXDB_INIT_BUCKET=yancc-bucket influxdb:2.3.0
+
+influx remote create --name remote_8088 --host http://127.0.0.1:8087 --org hollysys -t rxre8UGUAmqmbaAkGyhHaT7hLuG0xR6sS9in9P48zm4G8PNxUULsvUiNieLBdWJ5GIS8xKIROiZysH5bTqmwHg== --remote-url http://127.0.0.1:8088 --remote-api-token Dvu9hv-ZJkXGHznvuIUEMlFTXxOdL1Jtdp4DCHcn0f2UCBIxtbNMhLY25hYp5RZle_BEii9ZM_IYkGHzUCgNDQ== --remote-org-id dc3c8d6c62a8d0d5
+influx remote create --name remote_8088 --remote-url http://10.88.0.1:8088 --remote-api-token Dvu9hv-ZJkXGHznvuIUEMlFTXxOdL1Jtdp4DCHcn0f2UCBIxtbNMhLY25hYp5RZle_BEii9ZM_IYkGHzUCgNDQ== --remote-org-id b5f95973920b8e66
+influx replication create --name replication_8088  --org hollysys --remote-id 0ca9028df0b95000 --local-bucket-id 5badf2bc48eeb8ee  --remote-bucket-id ac158d601c04064f
+
+./influx remote create --name remote_244 --remote-url http://192.168.139.244:8086 --remote-org-id 879d2d6c7a8f359b  --remote-api-token ydKxUNxUt8alTvL6laKmeYW0GGA2fRn5HlHLvhUMJnBYOkJIpvKH37mcCCpU0A7yvjuZdN7zxKONnkh5H2EDmg==
+influx replication create --name replication_244  --org hollysys --remote-id 0ca94c2ec7cea000 --local-bucket-id fca13c5b5e5f76df  --remote-bucket-id 53a7e8ac09e4fe68
+
+influx delete --bucket tunnel --start 2024-03-01T00:00:00Z --stop 2024-03-02T00:00:00Z
+
+
+
+
+# 生产环境244从节点备份
+## 在244主机上，创建从节点influxdb数据库
+docker run -d --name influxdb2.3.0-slave1 -p 8086:8086 influxdb:2.3.0
+## 在244主机上导入246主机上现有的influxdb数据（因为influxdb不会同步历史数据，如果需要保证数据完整性需要先暂停influxdb数据库或者上层服务（如：nginx））
+ssh admin@192.168.139.246 -t "rm -rfv /home/admin/backup/influxdb-tunnel && cd /home/admin/apps/influxdb/clients/influxdb2-client-2.3.0 && ./influx backup --bucket tunnel --token  DHDItQ-heGe5S4rPPMWtIdM7BQ43edP24SRffQub81z_29ihkxGTxDdOnsUhGW0at-V6YEgA8R0x5tv7x2Itzw== /home/admin/backup/influxdb-tunnel" && rm -rfv ~/backup/influxdb-tunnel &&  scp -rv admin@192.168.139.246:backup/influxdb-tunnel ~/backup/influxdb-tunnel && cd ~/apps/influxdb/clients/influxdb2-client-2.3.0/ && ./influx restore ~/backup/influxdb-tunnel/
+## 在246主机上，进入influxdb命令行 Local创建remote-id
+cd /home/admin/apps/influxdb/clients/influxdb2-client-2.3.0
+## 在246主机上，Local创建remote-id
+./influx remote create --name remote_244 --remote-url http://192.168.139.244:8086 --remote-org-id 879d2d6c7a8f359b  --remote-api-token ydKxUNxUt8alTvL6laKmeYW0GGA2fRn5HlHLvhUMJnBYOkJIpvKH37mcCCpU0A7yvjuZdN7zxKONnkh5H2EDmg==
+## 在246主机上创建同步策略-replication
+./influx replication create --name replication_244  --org hollysys --remote-id 0ca94c2ec7cea000 --local-bucket-id fca13c5b5e5f76df  --remote-bucket-id 4f2d97fd004a211e
+```
+
+
