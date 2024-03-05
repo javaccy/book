@@ -1287,16 +1287,20 @@ influx delete --bucket tunnel --start 2024-03-01T00:00:00Z --stop 2024-03-02T00:
 
 
 # 生产环境244从节点备份
-## 在244主机上，创建从节点influxdb数据库
+## 1.在244主机上，创建从节点influxdb数据库
 docker run -d --name influxdb2.3.0-slave1 -p 8086:8086 influxdb:2.3.0
-## 在244主机上导入246主机上现有的influxdb数据（因为influxdb不会同步历史数据，如果需要保证数据完整性需要先暂停influxdb数据库或者上层服务（如：nginx））
+## 2.在244主机上导入246主机上现有的influxdb数据（因为influxdb不会同步历史数据，如果需要保证数据完整性需要先暂停influxdb数据库或者上层服务（如：nginx））
 ssh admin@192.168.139.246 -t "rm -rfv /home/admin/backup/influxdb-tunnel && cd /home/admin/apps/influxdb/clients/influxdb2-client-2.3.0 && ./influx backup --bucket tunnel --token  DHDItQ-heGe5S4rPPMWtIdM7BQ43edP24SRffQub81z_29ihkxGTxDdOnsUhGW0at-V6YEgA8R0x5tv7x2Itzw== /home/admin/backup/influxdb-tunnel" && rm -rfv ~/backup/influxdb-tunnel &&  scp -rv admin@192.168.139.246:backup/influxdb-tunnel ~/backup/influxdb-tunnel && cd ~/apps/influxdb/clients/influxdb2-client-2.3.0/ && ./influx restore ~/backup/influxdb-tunnel/
-## 在246主机上，进入influxdb命令行 Local创建remote-id
+## 3.在246主机上，进入influxdb命令行 Local创建remote-id
 cd /home/admin/apps/influxdb/clients/influxdb2-client-2.3.0
-## 在246主机上，Local创建remote-id
+## 4.在246主机上，Local创建remote-id
 ./influx remote create --name remote_244 --remote-url http://192.168.139.244:8086 --remote-org-id 879d2d6c7a8f359b  --remote-api-token ydKxUNxUt8alTvL6laKmeYW0GGA2fRn5HlHLvhUMJnBYOkJIpvKH37mcCCpU0A7yvjuZdN7zxKONnkh5H2EDmg==
-## 在246主机上创建同步策略-replication
+## 5.在246主机上创建同步策略-replication
 ./influx replication create --name replication_244  --org hollysys --remote-id 0ca94c2ec7cea000 --local-bucket-id fca13c5b5e5f76df  --remote-bucket-id 4f2d97fd004a211e
+
+## 注意：导入数据会创建存储桶，如果已经存在同名存储桶会导入失败，需要先删除
+### 删除存储桶 influx bucket delete --id <bucket_id>
+### 删除存储桶 influx delete --bucket <bucket_name> --start <start_time> --stop <stop_time>
 ```
 
 
