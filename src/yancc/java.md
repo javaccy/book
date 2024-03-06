@@ -18,6 +18,26 @@
     systemProp.https.proxyHost=127.0.0.1
     systemProp.https.proxyPort=8118
 ```
+### java 代理
+```text
+http  代理
+-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=1446
+https 代理
+-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=1446 
+socks 代理
+-DsocksProxyHost=127.0.0.1 -DsocksProxyPort=1446
+```
+```java
+// http 代理 
+System.setProperty("http.proxyHost","127.0.0.1"); 
+System.setProperty("http.proxyPort","1446");
+// https 代理 
+System.setProperty("https.proxyHost","127.0.0.1"); 
+System.setProperty("https.proxyPort","1446");
+// socks 代理 
+System.setProperty("socksProxyHost","127.0.0.1"); 
+System.setProperty("socksProxyPort","1446");
+```
 
 
 
