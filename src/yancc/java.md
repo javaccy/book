@@ -127,3 +127,114 @@ public class PointToDistance {
 	}
 
 ```
+
+## elasticsearch
+
+### elasticsearch 配置远程自定义词库
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">
+<properties>
+	<comment>IK Analyzer 扩展配置</comment>
+	<!--用户可以在这里配置自己的扩展字典 -->
+	<entry key="ext_dict"></entry>
+	 <!--用户可以在这里配置自己的扩展停止词字典-->
+	<entry key="ext_stopwords"></entry>
+	<!--用户可以在这里配置远程扩展字典 -->
+	<!-- <entry key="remote_ext_dict">words_location</entry> -->
+	<!--用户可以在这里配置远程扩展停止词字典-->
+	<!-- <entry key="remote_ext_stopwords">words_location</entry> -->
+	<entry key="remote_ext_dict">http://172.19.0.74:8080/es/remote_ext_dict?fileName=dict</entry>
+	<entry key="remote_ext_stopwords">http://172.19.0.74:8080/es/remote_ext_dict?fileName=stopwords</entry>
+</properties>
+```
+```java
+package com.ruoyi.web.controller.wenda;
+
+import com.ruoyi.common.core.controller.BaseController;
+import com.ruoyi.common.utils.ServletUtils;
+import io.swagger.annotations.ApiOperation;
+import org.apache.commons.compress.utils.Lists;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+
+import javax.annotation.Resource;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+
+
+@Controller
+@RequestMapping("/es")
+public class EsController extends BaseController {
+
+    private final Logger logger = LoggerFactory.getLogger(EsController.class);
+
+    @Resource
+    public JdbcTemplate jdbcTemplate;
+
+    /**
+     * 查询答案列表
+     */
+    @ApiOperation("获取es自定义分词信息")
+    @RequestMapping("/remote_ext_dict")
+    public void esRemoteDict(HttpServletRequest request, HttpServletResponse response, @RequestParam(required = false) String fileName) throws IOException {
+        if (logger.isDebugEnabled()) {
+            ServletUtils.printRequestInfo(request);
+        }
+        if (StringUtils.isBlank(fileName) || (!"dict".equals(fileName) && !"stop".equals(fileName))) {
+            throw new RuntimeException("请求参数错误！");
+        }
+        List<String> ss = Lists.newArrayList();
+        List<Map<String, Object>> list = Lists.newArrayList();
+        if ("dict".equals(fileName)) {
+            list = jdbcTemplate.queryForList("select w.id,w.words,w.update_time from znwd_es_words w where w.type = 0 order by id ");
+        }
+
+        if ("stop".equals(fileName)) {
+            list = jdbcTemplate.queryForList("select w.id,w.words,w.update_time from znwd_es_words w where w.type = 1 order by id ");
+        }
+        for (Map<String, Object> s : list) {
+            ss.addAll(Arrays.asList(s.get("words").toString().split(",")));
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String s : ss) {
+            sb.append(s);
+            sb.append("\n");
+        }
+        Map<String,Object> last = null;
+        if (!list.isEmpty()) {
+            last = list.get(list.size() - 1);
+        }
+        if (last != null) {
+           // 这两个标记很重要返回为空，不会出发es更新词库
+            response.setHeader("ETag", last.get("id").toString());//1713235417000
+            response.setHeader("Last-Modified", ((Timestamp) last.get("update_time")).getTime() + "");
+        }
+        response.setContentType("text/plain; charset=utf-8");
+        response.setContentLength(sb.toString().getBytes(StandardCharsets.UTF_8).length);
+        PrintWriter w = response.getWriter();
+        try {
+            w.write(sb.toString());
+            w.flush();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            w.close();
+        }
+
+    }
+
+}
+```

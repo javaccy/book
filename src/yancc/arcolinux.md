@@ -307,7 +307,7 @@ podman run -d -p 6379:6379 --restart=no --name redis  redis --requirepass "12345
 cd /home/yancc/apps/idea/jrebel/jrebel-license-serverfor-java/ && podman build ./ -t jrebel-server && podman run --privileged --name jrebel-server -p 1235:8081 --restart=no -d jrebel-server
 sudo systemctl enable --now container-yancc@jrebel-server.service
 
-
+[使用podman创建elasticsearch脚本](/resources/scripts/podman-create-elasticsearch.sh)
 
 临时
 sudo sysctl -w vm.max_map_count=16777216
@@ -324,6 +324,54 @@ podman run -d --name elasticsearch --restart no -p 9200:9200 -p 9300:9300 -e ES_
 wget https://github.com/medcl/elasticsearch-analysis-ik/releases/download/v6.8.6/elasticsearch-analysis-ik-6.8.6.zip
 podman cp ./elasticsearch-analysis-ik-6.8.6.zip elasticsearch:/usr/share/elasticsearch/elasticsearch-analysis-ik-6.8.6.zip
 podman exec -it -w /usr/share/elasticsearch elasticsearch sh -c '/usr/share/elasticsearch/bin/elasticsearch-plugin install file:///usr/share/elasticsearch/elasticsearch-analysis-ik-6.8.6.zip'
+
+
+#### podman 安装es8.x
+```shell
+ mkdir -p ~/apps/docker/elasticsearch8.12/config/
+ mkdir -p ~/apps/docker/elasticsearch8.12/config/analysis-ik
+ mkdir -p ~/apps/docker/elasticsearch8.12/logs
+ mkdir -p ~/apps/docker/elasticsearch8.12/data 
+ chmod -R 777 ~/apps/docker/elasticsearch8.12/config/
+ # 先安装一个不挂载目录的，用来拷贝基础配置文件 
+ podman cp elasticsearch8.12:/usr/share/elasticsearch/config ~/apps/docker/elasticsearch8.12/.
+# 删除
+podman stop elasticsearch8.12 && podman rm elasticsearch8.12
+# 再安装挂载目录的版本
+podman run -d --privileged=true --name elasticsearch8.12 -e "discovery.type=single-node" -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" -v /home/yancc/apps/docker/elasticsearch8.12/config/analysis-ik:/usr/share/elasticsearch/config/analysis-ik -v /home/yancc/apps/docker/elasticsearch8.12/plugins:/usr/share/elasticsearch/plugins -v /home/yancc/apps/docker/elasticsearch8.12/config:/usr/share/elasticsearch/config -v /home/yancc/apps/docker/elasticsearch8.12/data:/usr/share/elasticsearch/data -v /home/yancc/apps/docker/elasticsearch8.12/logs:/usr/share/elasticsearch/logs -p 19200:9200 -p 19300:9300 docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+# 进入容器
+podman exec -it elasticsearch8.12 /bin/bash
+# 查看日志 
+podman logs -f elasticsearch8.12
+# 进入容器后安装分词器
+export https_proxy=http://host.containers.internal:8118 && curl -L -v --output ik.zip https://github.com/medcl/elasticsearch-analysis-ik/releases/download/v8.12.2/elasticsearch-analysis-ik-8.12.2.zip && /usr/share/elasticsearch/bin/elasticsearch-plugin install file:///usr/share/elasticsearch/ik.zip 
+# 重置密码
+/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic
+```
+
+#### podman 安装elasticsearch7
+```shell
+mkdir -p ~/apps/docker/elasticsearch7/config/
+mkdir -p ~/apps/docker/elasticsearch7/config/analysis-ik
+mkdir -p ~/apps/docker/elasticsearch7/logs
+mkdir -p ~/apps/docker/elasticsearch7/data 
+chmod -R 777 ~/apps/docker/elasticsearch7/config/
+ # 先安装一个不挂载目录的，用来拷贝基础配置文件 
+podman run -d --privileged --name elasticsearch7 -e "discovery.type=single-node" -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" -v /home/yancc/apps/docker/elasticsearch7/plugins:/usr/share/elasticsearch/plugins -v /home/yancc/apps/docker/elasticsearch7/data:/usr/share/elasticsearch/data -v /home/yancc/apps/docker/elasticsearch7/logs:/usr/share/elasticsearch/logs -p 39200:9200 -p 39300:9300 docker.elastic.co/elasticsearch/elasticsearch:7.17.18
+# 进入容器
+podman exec -it elasticsearch8.12 /bin/bash
+# 查看日志 
+podman logs -f elasticsearch8.12
+# 进入容器后安装分词器
+export https_proxy=http://host.containers.internal:8118 && curl -L -v --output ik.zip https://github.com/medcl/elasticsearch-analysis-ik/releases/download/v7.17.18/elasticsearch-analysis-ik-7.17.18.zip && /usr/share/elasticsearch/bin/elasticsearch-plugin install file:///usr/share/elasticsearch/ik.zip 
+# 拷贝配置文件
+ podman cp elasticsearch8.12:/usr/share/elasticsearch/config ~/apps/docker/elasticsearch8.12/.
+# 删除
+podman stop elasticsearch8.12 && podman rm elasticsearch8.12
+ # 再安装挂载配置目录
+podman run -d --privileged --name elasticsearch7 -e "discovery.type=single-node" -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" -v /home/yancc/apps/docker/elasticsearch7/config:/usr/share/elasticsearch/config -v /home/yancc/apps/docker/elasticsearch7/plugins:/usr/share/elasticsearch/plugins -v /home/yancc/apps/docker/elasticsearch7/data:/usr/share/elasticsearch/data -v /home/yancc/apps/docker/elasticsearch7/logs:/usr/share/elasticsearch/logs -p 39200:9200 -p 39300:9300 docker.elastic.co/elasticsearch/elasticsearch:7.17.18
+
+```
 
 ###  podman/docker 创建influxdb
 
