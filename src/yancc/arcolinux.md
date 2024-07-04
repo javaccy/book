@@ -546,3 +546,17 @@ cd /home/yancc/IdeaZyyxProjects/xxl-job/xxl-job && mvn package -Dmaven.test.skip
 
 ### markdown 转 pdf：  pandoc -s -V mainfont='Noto Sans Mono CJK SC' -V CJKmainfont='Noto Sans Mono CJK SC'  /home/yancc/IdeaZyyxProjects/suidao/xitongguanli/organization-auth/doc/user-org-sync.md -o /home/yancc/IdeaZyyxProjects/suidao/xitongguanli/organization-auth/doc/用户组织机构同步接口文档.docx
 ### markdown 转 word： pandoc -s /home/yancc/IdeaZyyxProjects/suidao/xitongguanli/organization-auth/doc/user-org-sync.md -o /home/yancc/IdeaZyyxProjects/suidao/xitongguanli/organization-auth/doc/用户组织机构同步接口文档.docx
+
+### 微信开发工具 wechat-devtools
+```text
+1. 安装位置
+/home/yancc/apps/wechat/wechat-devtools-appimage
+2. 快捷方式
+vim ~/apps/wechat/wechat-devtools-appimage/squashfs-root/io.github.msojocs.wechat_devtools.desktop
+3. 启动命令
+ ~/apps/wechat/wechat-devtools-appimage/squashfs-root/bin/wechat-devtools
+4. 命令行工具
+~/apps/wechat/wechat-devtools-appimage/squashfs-root/bin/wechat-devtools-cli
+5. AppImage解压方式
+./WeChat_Dev_Tools_v1.06.2402040-1_x86_64_linux.AppImage --appimage-extract
+```
