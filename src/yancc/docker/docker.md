@@ -1,6 +1,12 @@
 
 #### 构建docker镜像
 
+### 调试模式
+
+```shell
+docker run -it -p 8081:80 -v /data/ragflow-front/conf/nginx/ragflow.conf:/etc/nginx/conf.d/ragflow.conf --rm --entrypoint /bin/sh 192.168.3.53:5000/ziyanxiangmu/ragflowfront:v4
+```
+
 ```shell
 podman build ./ -f Dockerfile -t jrebel-server
 ```
@@ -70,4 +76,9 @@ stream {
         # proxy_read_timeout 10s;  
     }
 }
+```
+```shell
+docker buildx build -f Dockerfile -t nginx-stream:v1.0 .
+docker stop nginx-stream && docker rm nginx-stream
+docker run -d --name nginx-stream -p 9888:9888 nginx-stream:v1.0
 ```
