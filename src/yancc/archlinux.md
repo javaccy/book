@@ -417,4 +417,29 @@ sudo systemd-hwdb update
 sudo downgrade 'freetype2=2.13.0'
 sudo downgrade --help
 
+### 颁发https证书, 方式1
+
+```shell
+ export TMP_NAME="test-rag-zyyx.com" && echo ContryName:CN,Province:HN,City:ZZ,CompanyName:Yancc,CommonName:Yancc,Name:Yancc,Email:1169353625@qq.com,Password:123456 && cd ~/apps/nginx/servers/csrs && rm -rfv $TMP_NAME.*  && openssl genrsa -out $TMP_NAME.key 2048 && openssl req -new -key $TMP_NAM
+E.key -out $TMP_NAME.csr && openssl x509 -req -days 365 -in $TMP_NAME.csr -signkey $TMP_NAME.key -out $TMP_NAME.crt -subj "/CN=$TMP_NAME" &&  openssl pkcs12 -export -out $TMP_NAME.p12 -inkey $TMP_NAME.key -in $TMP_NAME.crt
+```
+
+### 颁发https证书, 方式2,使用mkcert
+
+```shell
+yay install mkcert
+cd ~/apps/nginx/servers/csrs
+# 生成证书
+mkcert dev-rag-full-zyyx.com
+# 生成p12证书, 好像没什么用
+mkcert -pkcs12 dev-rag-full-zyyx.com
+# 安装证书
+mkcert -install
+
+# 粘贴nginx配置
+ssl_certificate /home/yancc/apps/nginx/servers/csrs/dev-rag-full-zyyx.com.pem;
+ssl_certificate_key /home/yancc/apps/nginx/servers/csrs/dev-rag-full-zyyx.com-key.pem;
+
+```
+
 
