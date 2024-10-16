@@ -442,4 +442,9 @@ ssl_certificate_key /home/yancc/apps/nginx/servers/csrs/dev-rag-full-zyyx.com-ke
 
 ```
 
+### 远程说面,Rdesktop
+```shell
+rdesktop -M -u yancc -g 1920x1080 -r disk:floppy=/home/yancc/Downloads/ 192.168.100.242
+```
+
 
