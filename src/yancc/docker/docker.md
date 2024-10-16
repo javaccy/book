@@ -44,6 +44,7 @@ ENTRYPOINT ["java","-jar","-Dspring.profiles.active=prod","-Dserver.port=8080","
 
 ```Dockerfile
 FROM nginx:latest
+#FROM nginx:1.27.2
 
 RUN cp /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.backup && \
     sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources && \
