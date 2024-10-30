@@ -76,6 +76,10 @@ sudo route del -net 192.168.141.0 dev tap0 gw 192.168.66.2 netmask 255.255.255.0
 # 服务端, tun 模式, 不需要iptables, 不需要  -o Tunnel=ethernet 这个ssh参数
 sudo vim /etc/ssh/sshd_config # 编辑这个配置文件，设置PermitTunnel的值为yes
 sudo vim /etc/sysctl.conf # 编辑这个配置文件,支持端口转发,添加net.ipv4.ip_forward=1 重启生效 或者 sudo sysctl -w net.ipv4.ip_forward=1 立即生效但是重启失效
+# 如果你需要通过远程主机访问更多网段，可能还需要在远程主机配置 NAT
+sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE  
+# ubuntu 可能没有自带iptables, 需要安装这个,才能生效
+sudo apt install iptables-persistent
 sudo sysctl -w net.ipv4.ip_forward=1 # 支持端口转发
 # 添加
 sudo sysctl -w net.ipv4.ip_forward=1 && sudo ip tuntap add tun0 mode tun && sudo ip link set tun0 up && sudo ip addr add 192.168.55.2/24 dev tun0
