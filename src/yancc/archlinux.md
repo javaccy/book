@@ -448,3 +448,19 @@ rdesktop -M -u yancc -g 1920x1080 -r disk:floppy=/home/yancc/Downloads/ 192.168.
 ```
 
 
+### Kvm, qemu 
+
+#### 是使用物理磁盘创建windows10
+
+```shell
+# 使用物理分区创建windows10
+
+sudo qemu-system-x86_64 -drive file=/dev/nvme0n1p4,format=raw,if=virtio -cdrom /mnt/E/iso/cn_windows_10_multiple_editions_version_1607_updated_jul_2016_x64_dvd_9056935.iso -boot d -enable-kvm -m 4G -cpu host -netdev tap,id=hostnet101,ifname=tap101,script=no,downscript=no -device e1000,netdev=hostnet101 -netdev user,id=nat102,hostfwd=tcp::5557-:3389 -device e1000,netdev=nat102
+
+# host only 网卡启动
+sudo ip link set tap101 up
+# host only 网卡设置ip地址, 设置后到客户机里面手动手指ip地址就可以了:例如192.168.101.2
+sudo ip addr add 192.168.101.1/24 dev tap101
+
+```
+
