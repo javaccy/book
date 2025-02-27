@@ -484,13 +484,21 @@ sudo systemctl restart systemd-resolved
 sudo rm /etc/resolv.conf
 sudo ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
+# 5. 测试和常用命令
+sudo resolvectl flush-caches # 清除缓存
+sudo resolvectl statistics # 验证刷新结果,   Current Cache Size: 0
+
+
 ```
 #### 安装配置 dnsmasq
     
     1. 安装dnsmasq
         sudo pacman -Ss dnsmasq
     2. 配置dnsmasq
-        sudo vim /etc/dnsmasq.conf
+        sudo vim /etc/dnsmasq.conf # 粘贴下面的配置
+        sudo systemctl restart dnsmasq # 重启dnsmasq
+        sudo systemctl enable dnsmasq # 设置开机启动dnsmasq
+        sudo dnsmasq  -d --log-debug # 直接测试, 不使用systemd启动
 ```text
 # 下面是yancc添加的配置
 # 设置启动 uid 。
