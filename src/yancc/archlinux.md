@@ -464,3 +464,110 @@ sudo ip addr add 192.168.101.1/24 dev tap101
 
 ```
 
+### 自定义dns
+    
+```shell
+# 解决本机dns监听非默认端口问题, 因为/etc/resolv.conf不支持配置端口号
+# 1. 安装systemd-resolvconf
+sudo pacman -S systemd-resolvconf
+# 2. 编修配置文件
+sudo vim /etc/systemd/resolved.conf
+[Resolve]
+DNS=127.0.0.1#5353
+DNSStubListener=yes
+
+# 3.启动systemd-resolvconf
+sudo systemctl enable systemd-resolved
+sudo systemctl restart systemd-resolved
+
+# 4. 替换默认/etc/resolv.conf
+sudo rm /etc/resolv.conf
+sudo ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
+```
+#### 安装配置 dnsmasq
+    
+    1. 安装dnsmasq
+        sudo pacman -Ss dnsmasq
+    2. 配置dnsmasq
+        sudo vim /etc/dnsmasq.conf
+```text
+# 下面是yancc添加的配置
+# 设置启动 uid 。
+user=nobody 
+# 设置启动 gid 。
+#group=nogroup 
+# 监听地址。必须加上 127.0.0.1
+
+# 如果不想 dnsmasq 读取 /etc/resolv.conf 文件获得它的上级 servers。即不使用上级 Dns 主机配置文件 (/etc/resolv.conf 和 resolv-file）可以开启改选项
+no-resolv
+# 不允许 dnsmasq 通过轮询 /etc/resolv.conf 或者其他文件来获取配置的改变，则取消注释。
+no-poll
+# 向上游所有服务器查询
+all-servers
+# 启用转发循环检测
+dns-loop-detect
+# 重启后清空缓存
+clear-on-reload
+# 完整域名才向上游服务器查询，如果是主机名仅查找 hosts 文件
+domain-needed
+
+# 为特定的域名指定解析它专用的 nameserver。一般是内部 Dns name server
+# server=/myserver.com/192.168.55.1
+
+# 指定 dnsmasq 默认查询的上游服务器，此处以 Google Public Dns 为例。
+server=114.114.114.114
+server=8.8.8.8
+server=8.8.4.4
+
+# 比如把所有.cn 的域名全部通过 114.114.114.114 这台国内 Dns 服务器来解析
+server=/hnic.com.cn/10.140.2.18
+server=/hntzjt.cn/10.140.2.18
+server=/huirongyun.cn/10.140.2.18
+server=/com.cn/114.114.114.114
+server=/cn/114.114.114.114
+server=/csdn.com/114.114.114.114
+server=/taobao.com/114.114.114.114
+server=/jd.com/114.114.114.114
+server=/qq.com/114.114.114.114
+server=/baidu.com/127.0.0.1
+
+
+# no-hosts, 默认情况下这是注释掉的，dnsmasq 会首先寻找本地的 hosts 文件，再去寻找缓存下来的域名，最后去上级 Dns 服务器中寻找；而 addn-hosts 可以使用额外的 hosts 文件。
+# Dns 解析 hosts 时对应的 hosts 文件，对应 no-hosts
+addn-hosts=/etc/hosts
+# Dns 缓存大小，Dns 解析条数
+cache-size=1024
+# 不缓存未知域名缓存，默认情况下 dnsmasq 会缓存未知域名并直接返回客户端
+no-negcache
+
+# 增加一个域名，强制解析到所指定的地址上，强行指定 domain 的 IP 地址
+address=/doubleclick.net/127.0.0.1
+# 知道这个原理之后，比如说可以屏蔽广告，把地址解析到一个本地地址
+address=/ad.youku.com/127.0.0.1
+address=/ad.iqiyi.com/127.0.0.1
+address=/www.baidu.com/127.0.0.1
+
+
+# 多个 IP 用逗号分隔，192.168.x.x 表示本机的 ip 地址，只有 127.0.0.1 的时候表示只有本机可以访问。
+# 通过这个设置就可以实现同一局域网内的设备，通过把网络 Dns 设置为本机 IP 从而实现局域网范围内的 Dns 泛解析（注：无效 IP 有可能导至服务无法启动）
+# 监听的服务器地址，通过该地址提供服务
+listen-address=0.0.0.0,127.0.0.1
+
+# 对于新添加的接口不进行绑定。仅 Linux 系统支持，其他系统等同于 bind-interfaces 选项。
+# bind-dynamic
+
+# hosts 中主机有多个 IP 地址，仅返回对应子网的 IP
+localise-queries
+
+# 如果反向查找的是私有地址例如  192.168.x.x，仅从 hosts 文件查找，不转发到上游服务器
+bogus-priv
+
+# 对于任何解析到该 IP 的域名，将响应 NXDOMAIN 使得其解析失效，可多次指定
+# 禁止跳转运营商广告站点
+#bogus-nxdomain=64.xx.xx.xx
+
+# 如果你想在某个端口只提供 Dns 服务，则可以进行配置禁止 dhcp 服务
+no-dhcp-interface=
+```
+
