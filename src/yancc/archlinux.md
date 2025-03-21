@@ -464,7 +464,7 @@ sudo ip addr add 192.168.101.1/24 dev tap101
 
 ```
 
-### 自定义dns
+### 自定义dns 方案1, 没成功
     
 ```shell
 # 解决本机dns监听非默认端口问题, 因为/etc/resolv.conf不支持配置端口号
@@ -578,4 +578,79 @@ bogus-priv
 # 如果你想在某个端口只提供 Dns 服务，则可以进行配置禁止 dhcp 服务
 no-dhcp-interface=
 ```
+
+### 自定义dns 方案2 使用虚拟网卡
+
+```shell
+# 创建虚拟网卡
+sudo ip link add dns0 type dummy
+sudo ip addr add 192.168.53.1/24 dev dns0
+sudo ip link set dns0 up 
+# 快捷操作
+sudo ip link add dns0 type dummy && sudo ip addr add 192.168.53.1/24 dev dns0 && sudo ip link set dns0 up 
+```
+
+```shell
+# 下面配置主要是, 监听53端口,不影响virt-manager虚拟机的dns服务, 其他配置可以参考上面的方案1dnsmasq配置
+# 配置dnsmasq ,interface=dns0 bind-interfaces,listen-address=192.168.53.1 这三个选项就可以在dns0正常减轻53端口了, 可以保证与kvm的虚拟网卡dnsmasq实例不冲突, 后面三个选项可选
+
+port=53 
+# 指定监听的网卡
+interface=dns0 
+# 这样 dnsmasq 只会监听 特定的接口，而不是所有可用的 IP。
+bind-interfaces
+# 监听地址, 多个IP这样写, 0.0.0.0,127.0.0.1
+listen-address=192.168.53.1
+
+# 这表示 dnsmasq 不会监听 lo (本地回环接口)，即 127.0.0.1 上不会提供 DNS 服务。
+# 如果你的 dnsmasq 需要在 127.0.0.1 提供解析，应该删除这一行。
+except-interface=lo
+# 这个参数允许 dnsmasq 绑定到动态 IP 地址的接口，适用于网络接口的 IP 可能变动的情况（例如 DHCP 分配的 IP）。
+# 如果你的 dnsmasq 监听多个 IP，但端口冲突，可以尝试改用：
+bind-dynamic
+```
+
+```unit file (systemd)
+# dnsmasq.service  
+# sudo vim /lib/systemd/system/dnsmasq.service
+[Unit]
+Description=dnsmasq - A lightweight DHCP and caching DNS server
+Documentation=man:dnsmasq(8)
+After=network.target
+Before=network-online.target nss-lookup.target
+Wants=nss-lookup.target
+
+[Service]
+Type=dbus
+BusName=uk.org.thekelleys.dnsmasq
+ExecStartPre=/usr/bin/dnsmasq --test
+ExecStart=/usr/bin/dnsmasq -k --enable-dbus --user=dnsmasq --pid-file
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+PrivateDevices=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+```shell
+sudo vim /etc/systemd/system/yancc-link-dns0.service 
+# 粘贴下面的内容
+[Unit]
+Description=Yancc Virtual Network Interface dns0
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/ip link add dummy0 type dummy
+ExecStartPost=/usr/bin/ip addr add 192.168.53.1/24 dev dummy0
+ExecStartPost=/usr/bin/ip link set dummy0 up
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
 
