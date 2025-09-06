@@ -411,6 +411,17 @@ sudo systemd-hwdb update
 	sudo systemctl enable --now podman.socket
 	sudo systemctl enable --now cockpit.socket 
 
+# dbeaver 
+
+```shell
+# 编译
+cd ~/apps/dbeaver/dbeaver/tools &&  PATH=/home/yancc/apps/base/sdk/java/maven/maven-3.9.8/bin:$PATH && JAVA_HOME=/home/yancc/apps/base/sdk/java/jdk/jdk-oracle-21 && ./build.sh
+# 启动
+~/apps/dbeaver/dbeaver/product/community/target/products/org.jkiss.dbeaver.core.product/linux/gtk/x86_64/dbeaver/dbeaver -vm /home/yancc/apps/base/sdk/java/jdk/jdk-oracle-21/bin/java -data /home/yancc/apps/dbeaver/data
+# 注意, 这两个目录是程序编译自动生成的,  ~/apps/dbeaver/dbeaver/tools/build.sh 这里面可以修改
+/home/yancc/apps/dbeaver/dbeaver-jdbc-libsql 
+/home/yancc/apps/dbeaver/dbeaver-common
+```
 
 
 ### 固定版本

@@ -1,0 +1,96 @@
+# 惠普战X笔记本自带键盘
+#I: Bus=0011 Vendor=0001 Product=0001 Version=ab41
+evdev:input:b0011v0001p0001*
+  KEYBOARD_KEY_3a=leftctrl
+  KEYBOARD_KEY_1d=capslock
+  KEYBOARD_KEY_db=leftalt
+  KEYBOARD_KEY_38=leftmeta
+
+# Cherry G3800 键盘
+evdev:input:b0003v046Ap010D*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+# KEYBOARD_KEY_700e6=esc
+
+# GANSS 可能是无线，没有测试过
+evdev:input:b0005v05ACp024F*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+
+# 高斯有线
+evdev:input:b0003v05ACp024F*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+
+# Cherry G80-3824 蓝牙
+evdev:input:b0005v0687p0008*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+ KEYBOARD_KEY_c00e2=f1
+ KEYBOARD_KEY_c00ea=f2
+ KEYBOARD_KEY_c00e9=f3
+ KEYBOARD_KEY_c0223=f10
+ KEYBOARD_KEY_c0194=f11
+
+#Bus=0003 Vendor=046a Product=01ac Version=0111
+# Cherry G80-3824 无线
+evdev:input:b0003v046Ap01AC*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+ KEYBOARD_KEY_c00e2=f1
+ KEYBOARD_KEY_c00ea=f2
+ KEYBOARD_KEY_c00e9=f3
+ KEYBOARD_KEY_c0223=f10
+ KEYBOARD_KEY_c0194=f11
+
+
+# Cherry G80-3824 有线
+#Bus=0003 Vendor=046a Product=01ab Version=0111
+evdev:input:b0003v046Ap01AB*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+ KEYBOARD_KEY_c00e2=f1
+ KEYBOARD_KEY_c00ea=f2
+ KEYBOARD_KEY_c00e9=f3
+ KEYBOARD_KEY_c0223=f10
+ KEYBOARD_KEY_c0194=f11
+
+#Bus=0003 Vendor=046a Product=00e5 Version=0111
+# Cherry G80-3882 USB
+evdev:input:b0003v046Ap00E5*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+
+#Bus=0003 Vendor=046a Product=00ec Version=0111
+# Cherry G80-3882 无线
+evdev:input:b0003v046Ap00EC*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+
+#Bus=0005 Vendor=0687 Product=00e8 Version=0100
+# Cherry G80-3882 蓝牙
+evdev:input:b0005v0687p00E8*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+
+
+
+

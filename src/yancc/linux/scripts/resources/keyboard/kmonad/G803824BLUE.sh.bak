@@ -1,0 +1,18 @@
+#!/bin/bash
+# G803824键盘支持
+num=$(nl -b a /proc/bus/input/devices | grep 'CHERRY MX 2.0S Wireless Mechanical Keyboard\|MX 2.0S-BT1 Keyboard\|MX 2.0S-BT2 Keyboard\|MX 2.0S-BT3 Keyboard')
+echo 第一步找到HP 战X键盘: $num
+num=$(echo $num | awk '{print int($1)}')
+echo 第二步找到标识符在第: $num 行
+num=$(($num+4))
+echo 第三步找到标识符在第: $num 行
+num=$(nl -b a /proc/bus/input/devices | sed -n "${num}p" | awk '{print $6}')
+echo 第四步找到标识符在第: $num 行
+str="\   input  (device-file \"/dev/input/$num\")"
+echo str:$str
+sed -i '12c '"$str"'' /home/yancc/apps/kmonad/G803824.kbd
+#测试  log  
+echo `date` $str  > /tmp/kmonad-G803824BLUE.log
+# 启动这一行 
+#/home/yancc/apps/kmonad/kmonad/kmonad /home/yancc/apps/kmonad/G803824BLUE.kbd
+#systemctl restart kmonad-G803824BLUE.service

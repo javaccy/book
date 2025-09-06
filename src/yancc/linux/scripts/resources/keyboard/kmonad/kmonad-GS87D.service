@@ -1,0 +1,22 @@
+[Unit]
+Description=kmonad keyboard config
+
+[Service]
+#启动的最大次数限制，超过后停止继续重启
+StartLimitBurst=10
+#前置脚本
+ExecStartPre=/home/yancc/apps/kmonad/GS87D.sh "GANSS  GS87D"
+#no:默认值，不会重启
+#on-success: 服务进程正常退出(退出码为"0"， 或者进程收到 SIGHUP, SIGINT, SIGTERM, SIGPIPE 信号之一， 并且 退出码符合 SuccessExitStatus= 的设置)时进行重启
+#on-failure: 仅在服务进程异常退出(退出码不为"0"， 或者 进程被强制杀死(包括 “core dump"以及收到 SIGHUP, SIGINT, SIGTERM, SIGPIPE 之外的其他信号)， 或者进程由于 看门狗超时 或者 systemd 的操作超时 而被杀死)时重启
+#always: 无条件重启
+Restart=always
+#多久后重启
+RestartSec=10
+#ExecStart=/usr/bin/kmonad %E/kmonad/config.kbd
+ExecStart=/usr/bin/kmonad /home/yancc/apps/kmonad/GS87D.kbd
+Nice=-20
+
+[Install]
+WantedBy=default.target
+

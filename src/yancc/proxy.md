@@ -36,6 +36,11 @@ class Main {
   export https_proxy=http://127.0.0.1:8118
   export http_proxy=socks5://127.0.0.1:1083
   export https_proxy=socks5://127.0.0.1:1083
+  
+  export http_proxy=socks4://127.0.0.1:5000 && export https_proxy=socks4://127.0.0.1:5000
+  export http_proxy=socks4://127.0.0.1:1083 && export https_proxy=socks4://127.0.0.1:1083
+  export http_proxy=socks://127.0.0.1:1083 && export https_proxy=socks://127.0.0.1:1083
+  export http_proxy=socks5://127.0.0.1:1083 && export https_proxy=socks5://127.0.0.1:1083
 ```
 
 ### git 代理

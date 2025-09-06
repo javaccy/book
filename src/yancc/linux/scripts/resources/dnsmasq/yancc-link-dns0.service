@@ -1,0 +1,15 @@
+[Unit]
+Description=Yancc Virtual Network Interface dns0
+After=network.target
+
+[Service]
+ExecStartPre=-/usr/bin/ip link delete dns0
+ExecStart=/usr/bin/ip link add dns0 type dummy
+ExecStartPost=/usr/bin/ip addr add 192.168.53.1/24 dev dns0
+ExecStartPost=/usr/bin/ip link set dns0 up
+RemainAfterExit=yes
+
+ExecStop=/usr/bin/ip link delete dns0
+
+[Install]
+WantedBy=multi-user.target

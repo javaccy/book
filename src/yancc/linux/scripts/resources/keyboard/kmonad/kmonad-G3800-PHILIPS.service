@@ -1,0 +1,13 @@
+[Unit]
+Description=kmonad keyboard config
+
+[Service]
+Restart=always
+RestartSec=3
+#ExecStart=/usr/bin/kmonad %E/kmonad/config.kbd
+ExecStart=/usr/bin/kmonad /home/yancc/apps/kmonad/G3800-PHILIPS.kbd
+Nice=-20
+
+[Install]
+WantedBy=default.target
+

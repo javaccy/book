@@ -1,0 +1,13 @@
+#!/bin/bash
+# 启动我的GS87D键盘支持, 配合GS87D.sh动态查询键盘，支持GS87D 蓝牙直连电脑，或者usb直连电脑，但是不支持扩展坞或者显示器usb扩展
+num=$(nl -b a /proc/bus/input/devices | grep 'GANSS  GS87D')
+echo 第一步找到GS87D键盘: $num
+num=$(echo $num | awk '{print int($1)}')
+echo 第二步找到标识符在第: $num 行
+num=$(($num+4))
+echo 第三步找到标识符在第: $num 行
+num=$(nl -b a /proc/bus/input/devices | sed -n "${num}p" | awk '{print $6}')
+echo 第四步找到标识符在第: $num 行
+str="\   input  (device-file \"/dev/input/$num\")"
+sed -i '12c '"$str"'' /home/yancc/apps/kmonad/GS87D.kbd
+systemctl restart kmonad-GS87D.service
