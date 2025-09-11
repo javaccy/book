@@ -1,0 +1,122 @@
+" :actionlist 命令,可以获取命令列表
+"文件存放位置 windows下 C:\Users\你的用户名\.ideavimrc，
+" 删除vim报警提示，这个提示在办公室非常不友好，他用的不是扬声器的声音而是蜂鸣器
+set visualbell
+set noerrorbells
+" 为IdeaVim插件增加自动切换为英文输入法的功能
+" 输入法自动切换功能，该功能是通过 fcitx-remote 命令实现的，fcit5中没有这个命令，只有fcitx5-remote, 可以通过创建软链接实现
+
+" set keep-english-in-normal
+" 回到insert#!/usr/bin/env 模式时恢复输入法
+set keep-english-in-normal-and-restore-in-insert
+" 回到insert#!/usr/bin/env 模式时不恢复输入法
+" set nokeep-english-in-normal-and-restore-in-insert
+set multiple-cursors
+" 启用vim surround功能 括号对
+set surround
+" 显示行号
+set nu
+" 显示相对行号
+" set rnu
+" 高亮搜索
+set hlsearch
+" 自动定位到输入中的字符串，不需要回车搜索
+set incsearch
+" 显示当前的模式
+set showmode
+" 共享系统粘贴板
+set clipboard=unnamed
+" 搜索时智能匹配大小写
+set ignorecase smartcase
+
+let mapleader=" "
+noremap <leader>; "0p
+" 运行当前文件
+nnoremap <leader>r :action RunClass<CR>
+" 改变量名
+nnoremap <leader>s :action RenameElement<CR>
+" 新建一个文件
+nnoremap <leader>n :action NewFile<CR>
+
+noremap <leader>k :action Back<CR>
+noremap <leader>j :action Forward<CR>
+noremap <leader>fs :action FileStructurePopup<CR>
+noremap <leader>rr :action ReformatCode<CR>
+"Ctrl + Shift + I查看快速定义
+nnoremap <leader>v :action QuickImplementations<CR>
+
+noremap <leader>ga :action GotoAction<CR>
+noremap <leader>gc :action GotoClass<CR>
+noremap <leader>gf :action GotoFile<CR>
+noremap <leader>gs :action GotoSymbol<CR>
+" noremap <leader>gd :action GotoDeclaration<CR>
+noremap <leader>gd :action GotoDatabaseObject<CR>
+noremap <leader>gdd :action Jdbc.OpenConsole.Any<CR>
+noremap <leader>gi :action GotoImplementation<CR>
+noremap <leader>gr :action GotoSuperMethod<CR>
+noremap <leader>ge :action RecentChangedFiles<CR>
+noremap <leader>gb :action Git.Branches<CR>
+noremap <leader>gp :action Git.Pull<CR>
+
+noremap <leader>fw :action Find<CR>
+noremap <leader>fr :action Replace<CR>
+noremap <leader>ff :action FindInPath<CR>
+noremap <leader>ffr :action ReplaceInPath<CR>
+
+noremap <leader>qq :action AceAction<CR>
+noremap <leader>ql :action AceLineAction<CR>
+noremap <leader>qw :action AceWordAction<CR>
+noremap <leader>qd :action AceDeclarationAction<CR>
+noremap <leader>qt :action AceTargetAction<CR>
+noremap <leader>qwb :action AceWordBackwardsAction<CR>
+noremap <leader>qwf :action AceWordForwardAction<CR>
+
+noremap tcc :action HideActiveToolWindows<CR>
+noremap tdd :action ActivateDatabaseToolWindow<CR>
+noremap tmm :action ActivateMavenToolWindow<CR>
+noremap tss :action ActivateServicesToolWindow<CR>
+no emap tce :action CloseEditor<CR>
+
+noremap <leader>bs :action ShowBookmarks<CR>
+noremap <leader>bb :action Bookmarks<CR>
+" tasks
+noremap <leader>tt :action tasks.and.contexts<CR>
+noremap <leader>tg :action tasks.goto<CR>
+" navigation
+noremap <leader>nn :action ViewNavigationBar<CR>
+
+" 选择单词
+noremap <leader>cw :action EditorSelectWord<CR>
+noremap w :action EditorSelectWord<CR>
+noremap W :action EditorUnSelectWord<CR>
+noremap p :action $Paste<CR>
+noremap y :action $Copy<CR>
+" Normal + Visual
+
+noremap # #zz
+noremap * *zz
+" noremap w wzz
+" noremap W Wzz
+noremap e ezz
+noremap E Ezz
+noremap b bzz
+noremap B Bzz
+" noremap H Hzz
+noremap H ^
+" noremap L Lzz
+noremap L $
+noremap 0 0zz
+noremap $ $zz
+noremap ^ ^zz
+noremap j jzz
+noremap k kzz
+noremap G Gzz
+noremap u uzz
+noremap ( (zz
+noremap ) )zz
+noremap { {zz
+noremap } }zz
+noremap [{ [{zz
+noremap ]} ]}zz
+noremap gd gdzz
+
