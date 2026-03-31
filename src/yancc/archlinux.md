@@ -165,6 +165,7 @@ evdev:input:b0005v05ACp024F*
 	sudo pacman -Syu xf86-video-amdgpu # Amd 安装这个
 	sudo pacman -S qemu-full libvirt virt-manager virt-viewer dnsmasq # 安装kvm虚拟机
 	sudo pacman -S wps-office-cn ttf-wps-fonts ttf-ms-fonts wps-office-fonts wps-office-mime-cn wps-office-mui-zh-cn
+    sudo yay -S ynote-desktop-bin --overwrite '*' --nodeps # 有道云笔记, 主要是这样安装可以忽略依赖, 它依赖java,我通常不需要它依赖的java, 其他依赖java的软件也可以参考这种方式
 
 
 
@@ -668,6 +669,22 @@ ExecStop=/usr/bin/ip link delete dns0
 WantedBy=multi-user.target
 
 
+```
+
+## 常用软件安装
+
+### 有道云笔记
+```shell
+# 切换到安装目录
+cd /home/yancc/apps/ynote
+# 去官网下载deb包
+https://note.youdao.com/note-download/
+# 
+ar x ynote-desktop-8.2.32.deb
+# 解压
+sudo tar -xf data.tar.xz -C ./
+rm -rfv ./usr 
+mv ./opt/有道云笔记 ./ynote
 ```
 
 
