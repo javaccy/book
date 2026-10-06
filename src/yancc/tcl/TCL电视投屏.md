@@ -122,6 +122,32 @@ Bind("SUPER + F12", "exec tv-cast")
 - 如果快捷键没反应，先怀疑 **F 键区的 Fn 锁**（台式机 CHERRY MX 2.0S 的 F9-F12 默认是媒体键，`Ctrl+Fn` 切换；笔记本同理看 FnLock 状态）
 - 脚本依赖 adb 网络连接，电视休眠太久 adb 可能掉线（脚本会自动 `adb connect` 重连；电视彻底断电关机则救不了）
 
+## 画面比例：解决电视两边黑边（16:10 → 16:9）
+
+**现象**：镜像投屏时电视左右有黑边。原因：笔记本屏 2560x1600 是 **16:10**，电视 3840x2160 是 **16:9**，Moonlight 保持比例缩放 → 两侧 pillarbox。
+
+**方案**：串流时把笔记本屏临时切成 16:9 模式（`2560x1440@60`，eDP-1 面板虽无原生 1440p 模式，但 Hyprland 能直接用），结束自动恢复 2560x1600@120。画面点对点无变形。
+
+实现（两个脚本互相冗余兜底，都幂等）：
+
+1. **`~/apps/tv/tv-mode.sh on|off`** — 模式切换本体。注意本机 Hyprland 是 Lua 配置，`hyprctl keyword` 已废，必须用 eval：
+   ```bash
+   hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "2560x1440@60", position = "920x1440", scale = 1.3333334 })'  # on
+   hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "preferred", ... })'                                            # off 恢复
+   ```
+   脚本里会自动从 `$XDG_RUNTIME_DIR/hypr/` 发现 `HYPRLAND_INSTANCE_SIGNATURE`（systemd 服务里没有这个环境变量）。
+
+2. **Sunshine prep-cmd**（`~/.config/sunshine/apps.json` 的 Desktop 条目）：开播前执行 `tv-mode.sh on`，保证截屏初始化时已是 16:9：
+   ```json
+   "prep-cmd": [ { "do": "/home/yancc/apps/tv/tv-mode.sh on", "undo": "/home/yancc/apps/tv/tv-mode.sh off" } ]
+   ```
+
+3. **`tv-cast` 里也各调一次**（关键补丁）：因为 Sunshine 的 undo **只在"退出串流"时才跑**，单纯断开连接（遥控器返回键/tv-cast off 的 BACK）不触发 undo；且"恢复串流"（AtchDlg 恢复旧会话）也不会重跑 do。所以 tv-cast 的 on/off 路径里都显式调一次 tv-mode.sh，保证任何进出路径屏幕模式都正确。
+
+副作用说明：串流期间笔记本自己的屏幕会上下留边（面板比 16:9 高），电视上是满的；串流一停笔记本立即恢复。
+
+备选方案（未采用）：Moonlight 设置里"将画面拉伸至全屏"也能去黑边，但画面横向拉伸 ~11% 变形；Hyprland headless 虚拟显示器方案可以把电视当独立扩展屏用，有需要再搞。
+
 ## TCL 电视的前台抢占规律（重要）
 
 - 第三方 App 打开后 **3~5 秒**会被系统拉回"小电视影视"（yst）或启动器，adb 注入的按键**不重置**这个计时器
