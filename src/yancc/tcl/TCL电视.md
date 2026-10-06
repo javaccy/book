@@ -88,6 +88,37 @@ adb -s 192.168.144.188:5555 shell settings put system tcl_app_auto_uninstall_swi
 - SSH 服务随 App 进程存活，切到后台/被 TCL 内存清理杀掉后 SSH 会断，重新打开 App 即可
 - 该 APK 是带 TCL 语音控制 SDK 的定制版（进程里有 `VoiceControl` / `dan` 日志）
 
+### SSH 登录方式（已配好免密）
+
+SimpleSSHD **没有固定密码**：没找到 authorized_keys 时，每次有人连接它都会生成一个**一次性随机密码**显示在电视屏幕上（日志区里 `generating single-use password:` 下面两条虚线中间那行），该密码只对本次连接有效，用一次即废。
+
+**已配好免密登录的机器**（2026-10-06）：
+
+| 机器 | IP | 说明 |
+|------|-----|------|
+| 笔记本 | 192.168.144.186 | 首个配置 |
+| 台式机 | 192.168.144.230 | 公钥已追加，ssh config 已写 |
+
+配置要点：
+
+- 公钥位置（注意：不是 `.ssh/` 子目录，dropbear 二进制里的路径模板是 `%s/authorized_keys`）：
+  `/data/user/0/org.galexander.sshd/files/authorized_keys`，每台机器一行公钥
+- `/sdcard` 下放 key **无效**：该机 sdcardfs 权限怪异（文件属主永远是 u0_a66、权限 600，删掉重推也一样），SimpleSSHD（u0_a76）读不到
+- 老 dropbear 只支持 ssh-rsa(SHA-1) 签名，OpenSSH 10.x 默认禁用，每台机器 `~/.ssh/config` 都要有：
+
+  ```
+  Host tcl-tv tv
+      HostName 192.168.144.188
+      Port 2222
+      User user
+      PubkeyAcceptedAlgorithms +ssh-rsa
+  ```
+
+- 直接 `ssh tcl-tv` 即可；登录后是应用用户 `u0_a76`，HOME 在应用私有目录
+- 新机器要免密：把它的公钥追加到电视上的 `/data/user/0/org.galexander.sshd/files/authorized_keys`（通过已配好的机器 `ssh tcl-tv 'echo "公钥内容" >> ...'` 即可）
+
+如果 key 失效要重新走密码流程，自动化思路：连接触发电视生成新密码 → adb `uiautomator dump` 读屏 → awk 抓"本机 IP 的 Child connection 对应的最新密码"→ 用 `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` 脚本喂回完成登录。
+
 ## 分析过程存档（反编译思路）
 
 如果以后固件升级方法失效，可按此重新分析：
