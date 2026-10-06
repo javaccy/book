@@ -688,3 +688,9 @@ mv ./opt/有道云笔记 ./ynote
 ```
 
 
+# 如果以后需要在不同音频输出之间切换，可以使用：
+```shell
+- pactl list short sinks - 查看所有音频输出
+- pactl set-default-sink <设备名> - 切换默认输出
+```
+
