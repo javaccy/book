@@ -1,5 +1,21 @@
 # archlinux 笔记
 
+## 台式机系统安装清单
+
+    1 磁盘分区 gpt
+    2 系统安装
+    3 添加用户
+    4 安装图形界面/窗口管理器dwm
+    5 安装输入法 fcitx5
+    6 修改键盘 hwdb
+    7 安装neovim,spacemacs
+    8 安装配置shadowsocks,redsocks,proxychains,privoxy
+    9 安装navicat
+    10 安装配置zsh oh-my-zsh,fzf,tmux,oh-my-tmux
+    11 配置docker服务
+    12 共享windows磁盘
+    13 kmonad 配置
+
 ## 键盘映射
 [参考教程](https://harttle.land/2019/08/08/linux-keymap-on-macbook.html)
 
@@ -693,4 +709,3 @@ mv ./opt/有道云笔记 ./ynote
 - pactl list short sinks - 查看所有音频输出
 - pactl set-default-sink <设备名> - 切换默认输出
 ```
-
