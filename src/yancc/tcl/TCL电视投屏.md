@@ -111,6 +111,8 @@ tv-cast off    # 只关
 
 脚本位置：**`~/apps/tv/tv-cast`**（电视相关脚本都放这个目录；`~/.local/bin/tv-cast` 是指向它的软链，保证命令在 PATH 里可用）。工作原理：adb 驱动电视端 Moonlight 自动点击（PcView → 电脑卡片 → Desktop → "恢复串流"对话框），带前台校验和重试对抗 TCL 的 5 秒抢前台。桌面有 mako 通知反馈结果。
 
+源码收在本仓库 **`src/yancc/tcl/scripts/`**（`tv-cast` + `tv-mode.sh` + `README.md`，两台机器同一份），部署就是 `cp tv-cast tv-mode.sh ~/apps/tv/ && chmod +x ~/apps/tv/tv-{cast,mode.sh}`。
+
 绑 Hyprland 快捷键，在 `hyprland.lua` 里加一行：
 
 ```lua
@@ -122,20 +124,78 @@ Bind("SUPER + F12", "exec tv-cast")
 - 如果快捷键没反应，先怀疑 **F 键区的 Fn 锁**（台式机 CHERRY MX 2.0S 的 F9-F12 默认是媒体键，`Ctrl+Fn` 切换；笔记本同理看 FnLock 状态）
 - 脚本依赖 adb 网络连接，电视休眠太久 adb 可能掉线（脚本会自动 `adb connect` 重连；电视彻底断电关机则救不了）
 
+### adb / Android SDK 路径统一（2026-10-07）
+
+两台机器统一用同一个 SDK 路径，`tv-cast` 就不需要额外配置：
+
+| 机器 | SDK 路径 | adb 来源 |
+|------|----------|----------|
+| 台式机 archlinux | `~/apps/android-studio/android/sdk` | 系统级 `/etc/profile` 里的 `ANDROID_BUILD_TOOLS` + `PATH`（写的是旧路径，靠软链生效） |
+| 笔记本 yancc-arcolinux | `~/apps/android-studio/android/sdk` | `~/.zshenv` 里新加的 `export PATH="$HOME/apps/android-studio/android/sdk/platform-tools:$PATH"` |
+
+- **台式机**：原来 SDK 在 `~/apps/Android/Sdk`（19G），已**移动**到 `~/apps/android-studio/android/sdk`，并在旧位置留了软链 `~/apps/Android/Sdk -> ~/apps/android-studio/android/sdk`。所以 `/etc/profile` 里的 `ANDROID_BUILD_TOOLS=/home/yancc/apps/Android/Sdk/platform-tools`、Android Studio 4.1 的老配置、`~/.android/avd/*` 全部继续可用，不用 root 改系统文件。Studio 配置里的 SDK 路径也已改成新路径（备份 `~/.config/Google/AndroidStudio4.1.bak-sdkmove-202610071831`）。
+- **笔记本**：SDK 本来就在 `~/apps/android-studio/android/sdk`，只是没进 `PATH`。写进 `~/.zshenv`（不是 `.zshrc`）是因为**非交互式 zsh 不读 `.zshrc`**，`ssh 笔记本 'adb devices'` 这种调用也要能找到 adb。备份 `~/.zshenv.bak-sdkpath-20261007`。
+- 脚本自身的 adb 查找顺序：`$ADB` → `PATH` → `~/apps/android-studio/android/sdk/platform-tools/adb` → `~/apps/Android/Sdk/platform-tools/adb` → `~/Android/Sdk/platform-tools/adb` → `$TV_DIR/adb`，所以两台机器即使 PATH 没配好也能跑。
+
+### `tv-cast` 实测踩坑与修复（2026-10-07）
+
+**结论：别用坐标点击，用方向键。** AppView 的 GridView 本身就持焦、恢复串流菜单的第一项默认选中，所以 `DPAD_CENTER` 就够用。而且**菜单只有按键驱动时才有焦点**——用 `input tap` 点开菜单时，菜单里没有任何节点是 `focused="true"`，再发 `DPAD_CENTER` 完全无效（这就是"停在恢复串流按钮上"的直接原因）。脚本现在只在 PcView 点一次主机卡片（PcView 是静态列表，坐标可靠，也不受卡片顺序影响），之后全程 `DPAD_CENTER` 驱动，实测 **on ≈ 12 秒、off ≈ 2.5 秒**，连跑 3 轮全过。
+
+踩过的坑：
+
+1. **`uiautomator dump` 在 AppView 里会失败**。AppView 拉主机应用列表时界面一直在转圈（uiautomator 要等界面 idle），dump 直接返回空 → 脚本拿不到磁贴坐标，表现就是"卡在桌面选择界面"。所以 AppView 之后一律不 dump。
+2. **应用列表约 2 秒才出来**，早按的 `DPAD_CENTER` 会被丢掉，得小步轮询重按。
+3. **`foreground` 判断曾永远失效**。原来用 `sed 's/.* \([^ /}]*\).*/\1/'` 取焦点窗口，会把 `com.limelight/com.limelight.Game` 截成 `com.limelight`，`case *Game*` 永远不匹配——成功也当失败、又补发一次 `DPAD_CENTER`（这次按键还会被送进游戏画面）。现在返回完整 `包名/Activity`。
+4. **TCL 自家影视 App 会抢前台**。电视停在 `com.xiaodianshi.tv.yst`（小电视影视）或 `com.tcl.qiyiguo` 时，`am start` 起来的 Moonlight 会被立刻抢回去（见下面"前台抢占规律"）。脚本开播前先 `am force-stop` 这两个包，状态机里发现前台被抢也会再摁一次重来。
+5. **电视上每次 `input keyevent` 约 1.1 秒**（每次都要现场起一个 `app_process`：实测 5 次 5.5 秒；对照 `dumpsys window` 5 次只要 0.86 秒）。按键次数就是耗时大头，所以脚本改成"少按、按准"。
+6. **`off` 一次退不干净**。从 Game 退到电视画面要按 **3 次** BACK（Game → AppView → PcView → 电视界面），原来只发 2 次，所以第一次只退到"桌面选择"那一页。现在串流中先按 1 次 BACK 正常断开（主机会收到结束通知），再 `am force-stop` 一步退出 Moonlight；adb 连不上时也会照常恢复显示器模式。
+
+### 画报屏保（待机画面）不会自动让位
+
+电视闲置约 2 分钟（`settings get system screen_off_timeout` = 120000）会进 TCL 的「画报」屏保：
+
+- `dumpsys power` 显示 `mWakefulness=Dreaming`（不是 `Awake`）
+- 前台窗口是 `com.tcl.appreciate.art/android.service.dreams.DreamActivity`
+- 屏保组件写在 `settings get secure screensaver_components`
+
+**屏保期间 `am start` 不会让画面切过来**，遥控器随便按一下（返回键）才退出去。脚本现在开播前先看 `mWakefulness`，非 `Awake` 就先发 `KEYCODE_WAKEUP`；`am start` 之后的前台校验也带重试。实测屏保中运行 `tv-cast on`，21 秒内进到 `com.limelight/com.limelight.Game`。
+
+注意区分：`input keyevent KEYCODE_SLEEP` 是**整机深度待机**，Wi-Fi 直接断掉（`No route to host`，WOL 魔术包也唤不醒），别拿它当屏保复现。
+
+### `tv-mode.sh` 切显示器模式：只有 `hyprctl reload` 生效（2026-10-07 修复）
+
+这个 Hyprland 版本（Lua 配置）实测下来：
+
+- `hyprctl eval 'hl.monitor({...})'` 在**运行时完全不生效**：`mode`/`scale`/`position` 改了没反应，连 `disabled = true` 都没效果；`hl.dsp.force_renderer_reload`、`dpms off/on` 也不触发应用
+- 对照测试：`hl.config({ general = { gaps_in = 42 } })` 立刻生效（`hyprctl getoption general:gaps_in` 从 5 变 42）——所以不是 eval 坏了，是 `hl.monitor` 这类规则只在配置加载时应用
+- `hyprctl keyword monitor` 已废弃：报 `keyword can't work with non-legacy parsers. Use eval.`
+
+**唯一生效的路径 = 把规则写进配置 + `hyprctl reload`**。于是拆出一个片段文件：
+
+1. `~/.config/hypr/monitor-cast.lua` 里只放一条 `hl.monitor({ output = ..., mode = ..., position = ..., scale = ... })`
+2. `hyprland.lua` 在该 output 规则**之后**加一行 `pcall(dofile, os.getenv("HOME") .. "/.config/hypr/monitor-cast.lua")`（同一 output 后加载的规则生效；用 `pcall` 兜底，片段文件缺失时不会让整个配置加载失败）
+3. `tv-mode.sh on|off` 只做三件事：覆写片段 → `hyprctl reload` → 读回 `hyprctl monitors` 校验，没切过去就打警告（防止再次悄悄退化成空操作）
+
+关于 `reload` 的顾虑已实测排除：**`hyprctl reload` 不会重跑 `hl.exec_cmd` 自启**（台式机的 fcitx5/waybar/copyq/hypridle/wsevent/specialguard、笔记本的 nm-applet/voice-daemon 等，reload 前后进程数完全一致）。
+
+两台机器的参数（EDID 不同，注意笔记本面板根本没有 2560x1440）：
+
+脚本源码见本仓库 `src/yancc/tcl/scripts/tv-mode.sh`，按 `hostname` 自动选下面这组参数：
+
+| 机器 | output | 投屏模式 | 位置 / 缩放 |
+|------|--------|----------|-------------|
+| 台式机 archlinux | HDMI-A-1（3440x1440@30） | 1920x1080@60 | 0x0 / 1 |
+| 笔记本 yancc-arcolinux | eDP-1（2560x1600@120） | 1920x1080@60 | 920x1440 / 1.3333334 |
+
 ## 画面比例：解决电视两边黑边（16:10 → 16:9）
 
 **现象**：镜像投屏时电视左右有黑边。原因：笔记本屏 2560x1600 是 **16:10**，电视 3840x2160 是 **16:9**，Moonlight 保持比例缩放 → 两侧 pillarbox。
 
-**方案**：串流时把笔记本屏临时切成 16:9 模式（`2560x1440@60`，eDP-1 面板虽无原生 1440p 模式，但 Hyprland 能直接用），结束自动恢复 2560x1600@120。画面点对点无变形。
+**方案**：串流时把屏幕临时切成 16:9 模式，结束自动恢复首选模式（台式机 HDMI-A-1：3440x1440@30 → 1920x1080@60；笔记本 eDP-1：2560x1600@120 → 1920x1080@60）。笔记本面板的 EDID 里没有 2560x1440，16:9 只能走 1080p。
 
 实现（两个脚本互相冗余兜底，都幂等）：
 
-1. **`~/apps/tv/tv-mode.sh on|off`** — 模式切换本体。注意本机 Hyprland 是 Lua 配置，`hyprctl keyword` 已废，必须用 eval：
-   ```bash
-   hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "2560x1440@60", position = "920x1440", scale = 1.3333334 })'  # on
-   hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "preferred", ... })'                                            # off 恢复
-   ```
-   脚本里会自动从 `$XDG_RUNTIME_DIR/hypr/` 发现 `HYPRLAND_INSTANCE_SIGNATURE`（systemd 服务里没有这个环境变量）。
+1. **`~/apps/tv/tv-mode.sh on|off`** — 模式切换本体：覆写 `~/.config/hypr/monitor-cast.lua` 片段后 `hyprctl reload`，并校验结果。**不能用 `hyprctl eval 'hl.monitor(...)'`**——运行时无效，原因见上面「`tv-mode.sh` 切显示器模式」一节。脚本会自动从 `$XDG_RUNTIME_DIR/hypr/` 发现 `HYPRLAND_INSTANCE_SIGNATURE`（systemd 服务里没有这个环境变量）。
 
 2. **Sunshine prep-cmd**（`~/.config/sunshine/apps.json` 的 Desktop 条目）：开播前执行 `tv-mode.sh on`，保证截屏初始化时已是 16:9：
    ```json
@@ -174,3 +234,5 @@ adb -s 192.168.144.188:5555 logcat | grep LimeLog
 - **电视搜不到电脑**：确认 Sunshine 日志里有 `Avahi service ... established`（mDNS 广播）；同一局域网即可
 - **配对后连不上**：PC 别锁屏/睡眠；Wayland 会话要保持活跃
 - **投的是错的屏幕**：设 `output_name`
+- **电视 adb 变 offline / ping 报 `No route to host`**：电视整机深度休眠了（不是屏保），Wi-Fi 已断，只能遥控器唤醒后再 `adb connect`；屏保状态（`mWakefulness=Dreaming`）网络是通的，两者别搞混
+- **笔记本上 `tv-cast` 报 "adb 未连接"**：确认 `command -v adb` 能找到（应为 `~/apps/android-studio/android/sdk/platform-tools/adb`）。找不到就把 PATH 那行补进 `~/.zshenv`（见上面「adb / Android SDK 路径统一」），或直接到 `~/apps/android-studio/android/sdk/platform-tools/` 手动 `./adb connect 192.168.144.188:5555`

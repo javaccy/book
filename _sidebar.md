@@ -7,6 +7,8 @@
   * [远程桌面 Sunshine + Moonlight](src/yancc/linux/远程桌面.md)
 * [arcolinux](src/yancc/arcolinux.md)
 * [archlinux](src/yancc/archlinux.md)
+* [TCL 电视](src/yancc/tcl/TCL电视.md)
+  * [TCL 电视投屏（Sunshine + Moonlight）](src/yancc/tcl/TCL电视投屏.md)
 * [PlantUML 画图](src/yancc/plantuml.md)
 * [MySQL](src/yancc/mysql/MySQL.md)
   * [MySQL5.7主从配置之一主多从](src/yancc/mysql/MySQL5.7主从配置之一主多从.md)

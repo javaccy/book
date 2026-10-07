@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# 一键开关 TCL 电视上的 Moonlight 串流（用 adb 驱动电视端自动点击）。
+#
+# 用法:
+#   tv-cast        开/关切换
+#   tv-cast on     只在电视上开播
+#   tv-cast off    只在电视上退出
+#
+# 参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
+set -uo pipefail
+
+TV="${TCL_TV_ADDR:-192.168.144.188:5555}"
+TV_MAC="${TCL_TV_MAC:-}"
+PC_NAME="${TCL_PC_NAME:-$(hostname)}"
+TV_DIR="$HOME/apps/tv"
+LOG="$TV_DIR/tv-cast.log"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+STATE="$RUNTIME_DIR/tv-cast.state"
+# 电视自带的影视 App，会主动把前台抢回去（见 TCL电视投屏.md），开播时要摁住
+TCL_VIDEO_APPS="${TCL_VIDEO_APPS:-com.xiaodianshi.tv.yst com.tcl.qiyiguo}"
+
+# adb：优先用 $ADB，其次 PATH，最后兜底到常见的 SDK 目录
+# （ssh / systemd 这类非交互环境的 PATH 里常常没有 adb）
+# 两台机器统一用 ~/apps/android-studio/android/sdk/platform-tools/adb
+if [ -z "${ADB:-}" ]; then
+  ADB="$(command -v adb 2>/dev/null || true)"
+  for c in "$HOME/apps/android-studio/android/sdk/platform-tools/adb" \
+           "$HOME/apps/Android/Sdk/platform-tools/adb" \
+           "$HOME/Android/Sdk/platform-tools/adb" "$TV_DIR/adb"; do
+    [ -n "$ADB" ] && break
+    [ -x "$c" ] && ADB="$c"
+  done
+  ADB="${ADB:-adb}"
+fi
+
+log()  { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null; }
+note() { command -v notify-send >/dev/null 2>&1 && notify-send -a tv-cast "$@" >/dev/null 2>&1; }
+
+adb_tv() { "$ADB" -s "$TV" "$@"; }
+
+# 电视深度待机时 Wi-Fi 会断开，best-effort 用 WOL 魔术包唤醒（需设 TCL_TV_MAC）。
+wake_on_lan() {
+  [ -n "$TV_MAC" ] || return 1
+  python3 - "$TV_MAC" <<'PY' >/dev/null 2>&1
+import socket, sys
+mac = sys.argv[1].replace(":", "").replace("-", "")
+data = b"\xff" * 6 + bytes.fromhex(mac) * 16
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+for port in (7, 9):
+    s.sendto(data, ("255.255.255.255", port))
+PY
+}
+
+ensure_adb() {
+  local i
+  for i in 1 2 3; do
+    "$ADB" connect "$TV" >/dev/null 2>&1
+    [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
+    sleep 1
+  done
+  if wake_on_lan; then
+    log "adb 未连接，已发 WOL，等待电视上线"
+    for i in $(seq 1 8); do
+      sleep 2
+      "$ADB" connect "$TV" >/dev/null 2>&1
+      [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
+    done
+  fi
+  return 1
+}
+
+# 导出当前界面里所有有文字的节点，输出: 文本<TAB>中心x<TAB>中心y
+# 注意：AppView 加载应用列表时界面一直在转圈，uiautomator dump 会失败，
+# 所以只在静态界面（PcView / 对话框）用它。
+ui_nodes() {
+  adb_tv shell "uiautomator dump /data/local/tmp/tvui.xml >/dev/null 2>&1" >/dev/null 2>&1
+  adb_tv shell cat /data/local/tmp/tvui.xml 2>/dev/null | python3 -c '
+import re, sys
+data = sys.stdin.read()
+for tag in re.findall(r"<node[^>]*>", data):
+    text = re.search(r"text=\"([^\"]*)\"", tag)
+    bounds = re.search(r"bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"", tag)
+    if not text or not bounds:
+        continue
+    value = text.group(1).strip()
+    if not value:
+        continue
+    x1, y1, x2, y2 = map(int, bounds.groups())
+    print(f"{value}\t{(x1 + x2) // 2}\t{(y1 + y2) // 2}")
+'
+}
+
+# 点击第一个文本包含 $1 的节点；成功返回 0
+tap_text() {
+  local want="$1" line x y
+  line="$(ui_nodes | grep -F -- "$want" | head -n1)"
+  [ -n "$line" ] || return 1
+  IFS=$'\t' read -r _ x y <<< "$line"
+  log "tap '$want' @ $x,$y"
+  adb_tv shell input tap "$x" "$y"
+}
+
+# 点弹窗里的“恢复串流”（主机已有运行中的会话时点应用磁贴会弹这个菜单）
+tap_resume() {
+  local line x y
+  line="$(ui_nodes | grep -E '恢复串流|开始串流|继续串流' | head -n1)"
+  [ -n "$line" ] || return 1
+  IFS=$'\t' read -r _ x y <<< "$line"
+  log "tap '恢复串流' @ $x,$y"
+  adb_tv shell input tap "$x" "$y"
+}
+
+# 当前焦点窗口，形如 com.limelight/com.limelight.Game 或 AtchDlg:com.limelight/com.limelight.AppView
+foreground() {
+  adb_tv shell dumpsys window 2>/dev/null \
+    | grep -m1 -o 'mCurrentFocus=Window{[^}]*}' \
+    | sed -E 's/^mCurrentFocus=Window\{[^ ]+ //; s/^u[0-9]+ //; s/\}$//'
+}
+
+fg_is() { case "$(foreground)" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+
+wait_fg_out() {
+  local want="$1" tries="${2:-8}" i
+  for i in $(seq 1 "$tries"); do
+    fg_is "$want" || return 0
+    sleep 0.4
+  done
+  return 1
+}
+
+silence_tcl() {
+  local p
+  for p in $TCL_VIDEO_APPS; do
+    adb_tv shell am force-stop "$p" >/dev/null 2>&1
+  done
+}
+
+# 电视待机/屏保时画面是静止的，不先唤醒的话投过去画面也不会刷新
+wake_screen() {
+  local st
+  st="$(adb_tv shell dumpsys power 2>/dev/null | sed -n 's/.*mWakefulness=\([A-Za-z]*\).*/\1/p' | head -n1)"
+  [ "$st" = "Awake" ] && return 0
+  log "屏幕状态 $st，发送唤醒键"
+  adb_tv shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1
+  sleep 1.5
+}
+
+cast_on() {
+  ensure_adb || { log "adb 连接失败（电视未开/未授权）"; note "投屏失败" "电视 adb 未连接或未授权"; return 1; }
+  "$TV_DIR/tv-mode.sh" on >> "$LOG" 2>&1 || true
+  wake_screen
+
+  silence_tcl
+
+  # 全程状态机：按当前前台窗口决定下一步，中途被 TCL 抢走就摁回去重来。
+  # - PcView：点本机卡片（按文字取坐标，PcView 是静态列表，dump 可靠且不受卡片顺序影响）
+  # - AppView：网格持焦，回车即启动第一个应用（Desktop）；
+  #   注意应用列表要 ~2 秒才出来，早按会丢，所以小步轮询重按，且这里不 dump
+  #   （AppView 转圈时 uiautomator dump 必失败，之前卡在“选择桌面”就是这个原因）
+  # - AtchDlg：主机有运行中会话时弹的菜单，“恢复串流”默认选中，回车即确认
+  adb_tv shell am force-stop com.limelight >/dev/null 2>&1
+  sleep 0.3
+  adb_tv shell "am start -n com.limelight/.PcView" >/dev/null 2>&1
+
+  local ok=0 i f prev="" menu_tries=0
+  for i in $(seq 1 40); do
+    f="$(foreground)"
+    case "$f" in
+      *Game*) ok=1; break ;;
+      *AtchDlg*)
+        menu_tries=$((menu_tries + 1))
+        if [ "$menu_tries" -le 2 ]; then
+          adb_tv shell input keyevent DPAD_CENTER
+        else
+          tap_resume || adb_tv shell input keyevent DPAD_CENTER
+        fi
+        prev="AtchDlg" ;;
+      *AppView*)
+        [ "$prev" = "AppView" ] || sleep 0.5
+        adb_tv shell input keyevent DPAD_CENTER
+        prev="AppView" ;;
+      *PcView*)
+        if [ "$prev" != "PcView" ]; then
+          sleep 0.6
+          if ! tap_text "$PC_NAME"; then
+            log "没找到 '$PC_NAME' 卡片，用方向键兜底"
+            adb_tv shell input keyevent DPAD_RIGHT
+            sleep 0.3
+            adb_tv shell input keyevent DPAD_CENTER
+          fi
+        fi
+        prev="PcView" ;;
+      *)
+        if [ -n "$f" ]; then
+          log "前台被 $f 抢走，摁住电视自家 App 后重来"
+          silence_tcl
+          adb_tv shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1
+          adb_tv shell "am start -n com.limelight/.PcView" >/dev/null 2>&1
+          sleep 1
+        else
+          sleep 0.4
+        fi
+        prev="" ;;
+    esac
+    sleep 0.3
+  done
+
+  if [ "$ok" != 1 ]; then
+    log "未进入串流画面（$(foreground)）"
+    note "投屏失败" "停在 $(foreground)，请手动确认"
+    return 1
+  fi
+
+  echo on > "$STATE"
+  log "cast_on done (foreground=$(foreground))"
+  note "投屏已开启" "$PC_NAME → TCL 电视"
+}
+
+cast_off() {
+  if ensure_adb; then
+    local i
+    # 串流中先按一次返回键，让 Moonlight 正常断开（会通知主机结束会话）
+    if fg_is Game; then
+      adb_tv shell input keyevent KEYCODE_BACK
+      wait_fg_out Game 5
+    fi
+    # 一次 BACK 只退一层（Game→AppView→PcView→电视桌面），要退到电视画面得按 3 次；
+    # 直接 force-stop 一步到位，反正这里已经断开串流了，不需要任务栈
+    adb_tv shell am force-stop com.limelight >/dev/null 2>&1
+    sleep 0.4
+    # 兜底：万一还停在前台（个别情况 force-stop 后窗口没立刻消失）
+    for i in $(seq 1 3); do
+      fg_is com.limelight || break
+      adb_tv shell input keyevent KEYCODE_BACK
+      sleep 1
+    done
+  else
+    log "adb 连接失败(off)，跳过电视端操作"
+  fi
+  "$TV_DIR/tv-mode.sh" off >> "$LOG" 2>&1 || true
+  echo off > "$STATE"
+  log "cast_off done (foreground=$(foreground))"
+  note "投屏已关闭" ""
+}
+
+case "${1:-}" in
+  on)  cast_on ;;
+  off) cast_off ;;
+  "")  if [ "$(cat "$STATE" 2>/dev/null || echo off)" = "on" ]; then cast_off; else cast_on; fi ;;
+  *)   echo "usage: $(basename "$0") [on|off]" >&2; exit 2 ;;
+esac
