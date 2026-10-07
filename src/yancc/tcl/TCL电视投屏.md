@@ -160,7 +160,7 @@ Bind("SUPER + F12", "exec tv-cast")
 
 **屏保期间 `am start` 不会让画面切过来**，遥控器随便按一下（返回键）才退出去。脚本现在开播前先看 `mWakefulness`，非 `Awake` 就先发 `KEYCODE_WAKEUP`；`am start` 之后的前台校验也带重试。实测屏保中运行 `tv-cast on`，21 秒内进到 `com.limelight/com.limelight.Game`。
 
-注意区分：`input keyevent KEYCODE_SLEEP` 是**整机深度待机**，Wi-Fi 直接断掉（`No route to host`，WOL 魔术包也唤不醒），别拿它当屏保复现。
+注意区分：`input keyevent KEYCODE_SLEEP`（以及遥控器电源键 `KEYCODE_POWER`）是**整机待机断电**，不是屏保：有线网卡和 WiFi 一起断（实测两个地址的 ARP 都变 `FAILED`），WOL 魔术包也唤不醒，详见文末「待机 = 整机断电」一节。
 
 ### `tv-mode.sh` 切显示器模式：只有 `hyprctl reload` 生效（2026-10-07 修复）
 
@@ -234,5 +234,52 @@ adb -s 192.168.144.188:5555 logcat | grep LimeLog
 - **电视搜不到电脑**：确认 Sunshine 日志里有 `Avahi service ... established`（mDNS 广播）；同一局域网即可
 - **配对后连不上**：PC 别锁屏/睡眠；Wayland 会话要保持活跃
 - **投的是错的屏幕**：设 `output_name`
-- **电视 adb 变 offline / ping 报 `No route to host`**：电视整机深度休眠了（不是屏保），Wi-Fi 已断，只能遥控器唤醒后再 `adb connect`；屏保状态（`mWakefulness=Dreaming`）网络是通的，两者别搞混
+- **电视 adb 变 offline / ping 报 `No route to host`**：电视待机了（不是屏保），有线和 WiFi 都断，只能用遥控器/HDMI-CEC 唤醒后再 `adb connect`；屏保状态（`mWakefulness=Dreaming`）网络是通的，两者别搞混
 - **笔记本上 `tv-cast` 报 "adb 未连接"**：确认 `command -v adb` 能找到（应为 `~/apps/android-studio/android/sdk/platform-tools/adb`）。找不到就把 PATH 那行补进 `~/.zshenv`（见上面「adb / Android SDK 路径统一」），或直接到 `~/apps/android-studio/android/sdk/platform-tools/` 手动 `./adb connect 192.168.144.188:5555`
+
+## 待机 = 整机断电：网络唤醒（WOL）实测不可行（2026-10-07）
+
+用遥控器（或 `input keyevent KEYCODE_POWER`）关掉电视后，电视是**整机断电**，不是"网络待机"：
+
+- `ping` 不通，`ip neigh` 里 `eth0` 和 `wlan0` 两个地址都变 **`FAILED`**（网卡连 ARP 都不回）
+- 打开 WoWLAN（`settings put global wifi_wakeup_enabled 1`）+ `wifi_sleep_policy=2` 之后再关机，一样全断
+- 36 个 WOL 魔术包（有线 MAC `d0:65:b3:ca:2f:09` + WiFi MAC `7c:01:3e:ff:5e:92`，广播+单播，UDP 9/7）等 30 秒，**零反应**
+
+结论：**网络远程开机在这台电视上物理上不可能**，只剩下红外 / HDMI-CEC / 智能插座（硬断电）三条路。
+
+顺带实测（回答"能不能有线和 WiFi 同时连"）：**可以**。
+有线 `eth0` = `192.168.144.188`、WiFi `wlan0` = `192.168.144.236` 能同时拿 IP，adb 两个地址都能连
+（`adb devices` 里同一台电视出现两次），默认路由走有线（`Active default network: 100`，Ethernet 分更高）。
+注意 5GHz 的 `GL-KULUOBO` 是 **WPA3-SAE**，用 `wpa2` 连会报 `AUTHENTICATION_FAILURE_EVENT reason=2:ERROR_AUTH_FAILURE_TIMEOUT`，要用 `wpa3`：
+
+```bash
+adb -s 192.168.144.188:5555 shell "cmd wifi connect-network GL-KULUOBO wpa3 '密码'"
+```
+
+> 待机时网卡一起断电，所以"双网在线"对开机没帮助——只在电视开着时有意义（两条 adb 路可互为冗余）。
+
+## 待办：HDMI-CEC 远程开机（等树莓派接上再做）
+
+思路：树莓派常开 + HDMI 线接电视，用 HDMI-CEC 发 "Image View On" 叫醒电视。
+CEC 是独立**常电**信号线路（待机也在听），这正是它比 WOL 靠谱的原因。
+
+1. **树莓派**：装 `cec-utils`（Arch ARM）/ `apt install cec-utils`，然后
+   ```bash
+   echo "on 0" | cec-client -s -d 1     # on 0 = 对逻辑地址 0（电视）发 Image View On
+   ```
+   走内核 CEC 接口的等价写法：`cec-ctl -d /dev/cec0 --playback --image-view-on`。
+   注意 **Pi 5 上 libcec 支持有问题**，Pi 4 及以下稳妥。
+2. **电视端**（要电视开着时用 adb 改，当前 `hdmi_control_auto_wakeup_enabled=0`，`hdmi_control_enabled=1`）：
+   ```bash
+   adb -s 192.168.144.188:5555 shell settings put global hdmi_control_auto_wakeup_enabled 1
+   ```
+   对应菜单大致是 设置 → 通用 → HDMI 控制（这台设置菜单只有 图像/声音/网络/蓝牙/信号源/AI智能/通用/个性化/关于，
+   而且**只吃方向键、不响应触摸**，用 `input tap` 点不动）。
+3. **接到 `tv-cast`**：在 `ensure_adb` 里"3 次快速重试 + WOL"都失败之后，执行 `TCL_CEC_WAKE_CMD`
+   （例：`ssh pi@192.168.144.x 'echo "on 0" | cec-client -s -d 1'`），再轮询等 adb 上线。
+   > 这段代码之前写过一版（`cec_wake()` + 抽出 `wait_adb()` 轮询），当时按需求回退了，要做时照同样思路加回即可。
+   > 注意保留原来的快路径：先原地 `adb connect` 试 3 次（各隔 1 秒），别一上来就 `sleep 2`，否则电视开着时白等。
+4. **验证**：遥控器关机 → `tv-cast on` → 电视被 CEC 叫醒并直接开播。
+
+排查：CEC 不生效常见原因是电视「HDMI 控制」没开、树莓派那个 HDMI 口从没被电视识别过（先在电视上手动切过去激活一次）、
+或者电视待机模式设成了最省电那档（会连 CEC 接收一起关掉）。

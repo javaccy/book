@@ -39,3 +39,8 @@ tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
 - **adb 可用**：两台机器统一在 `~/apps/android-studio/android/sdk/platform-tools/adb`
   （笔记本写在 `~/.zshenv` 的 PATH 里；脚本自己也有兜底查找顺序）。
 - 电视进「画报」屏保时脚本会先发 `KEYCODE_WAKEUP`，不用遥控器按返回键。
+
+## 已知限制
+
+- **遥控器关机后无法网络唤醒**：这台电视待机时整机断电（有线+WiFi 的 ARP 都不回），WOL 无效。
+  计划用树莓派 + HDMI-CEC 解决，方案和步骤见文档末尾「待办：HDMI-CEC 远程开机」。
