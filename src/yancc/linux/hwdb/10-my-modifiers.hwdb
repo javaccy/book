@@ -1,0 +1,19 @@
+evdev:input:b0005v05ACp024F*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ #KEYBOARD_KEY_700e3=leftalt
+ #KEYBOARD_KEY_700e2=leftmeta
+
+evdev:input:b0003v05ACp024F*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+# KEYBOARD_KEY_700e3=leftalt
+# KEYBOARD_KEY_700e2=leftmeta
+
+# 应该是我的，g3800
+evdev:input:b0003v046Ap010D*
+ KEYBOARD_KEY_70039=leftctrl
+ KEYBOARD_KEY_700e0=capslock
+ KEYBOARD_KEY_700e3=leftalt
+ KEYBOARD_KEY_700e2=leftmeta
+ KEYBOARD_KEY_700e6=esc

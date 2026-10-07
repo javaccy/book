@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# pc-remote —— 局域网两台 PC 互控（Sunshine 推流端 + Moonlight 客户端）
+#
+#   台式机  archlinux        192.168.144.230   HDMI-A-1
+#   笔记本  yancc-arcolinux  192.168.144.186   eDP-1 / DP-1
+#
+# 用法:
+#   pc-remote pair   [host]          自动配对（不用手工去网页输 PIN）
+#   pc-remote list   [host]          列出对端可以串流的应用
+#   pc-remote stream [host] [app]    开始串流（默认 PC Remote Desktop）
+#   pc-remote gui                    打开 Moonlight 图形界面
+#   pc-remote peer                   打印对端 IP
+#
+# 环境变量:
+#   SUNSHINE_CREDS  网页管理端账号，默认 sunshine:sunshine123
+#   SUNSHINE_PORT   默认 47990
+#   PC_REMOTE_PEER  覆盖对端 IP
+#   PC_REMOTE_BITRATE  串流码率(kbps)。不设时：笔记本作主机默认 8000，
+#                      其它方向用 Moonlight 自动值（原因见文档「串流频繁掉线」一节）
+#
+# 参考: ~/IdeaProjects/book/src/yancc/linux/远程桌面.md
+set -uo pipefail
+
+CRED="${SUNSHINE_CREDS:-sunshine:sunshine123}"
+PORT="${SUNSHINE_PORT:-47990}"
+APP="${PC_REMOTE_APP:-PC Remote Desktop}"
+LOG="${XDG_RUNTIME_DIR:-/tmp}/pc-remote-pair.log"
+
+case "$(hostname)" in
+  archlinux)       PEER="${PC_REMOTE_PEER:-192.168.144.186}" ;;
+  yancc-arcolinux) PEER="${PC_REMOTE_PEER:-192.168.144.230}" ;;
+  *)               PEER="${PC_REMOTE_PEER:-}" ;;
+esac
+
+# SSH 里没有图形会话时让 Qt 走 offscreen，否则会 fallback 到 EGLFS 报 amdgpu 错
+if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+  export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+fi
+
+die() { echo "pc-remote: $*" >&2; exit 1; }
+api() { curl -sk -u "$CRED" "https://$1:$PORT/api/pin"; }
+
+# 待配对请求 -> "id name" 每行一条
+pending() {
+  api "$1" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for p in d.get("pairings") or []:
+    print(p.get("id", ""), p.get("name", ""))
+'
+}
+
+cmd_pair() {
+  local host="$1" pin id name mpid out
+  curl -sk -o /dev/null --connect-timeout 5 "https://$host:$PORT/" \
+    || die "$host:$PORT 连不上，确认对端 Sunshine 在跑"
+
+  out=$(timeout 30 moonlight list "$host" 2>&1)
+  if ! grep -qi "has not been paired" <<<"$out"; then
+    echo "已经配对过了，无需重复配对："; echo "$out"; return 0
+  fi
+
+  while read -r id name; do
+    [ -n "$id" ] || continue
+    echo "==> 清理残留的配对请求 $id"
+    curl -sk -u "$CRED" -X DELETE "https://$host:$PORT/api/pin" \
+      -H 'Content-Type: application/json' -d "{\"pairing_id\":\"$id\"}" >/dev/null
+  done < <(pending "$host")
+
+  pin=$(printf '%04d' $(( (RANDOM % 9000) + 1000 )))
+  echo "==> 向 $host 发起配对（PIN=$pin）"
+  moonlight pair "$host" --pin "$pin" >"$LOG" 2>&1 &
+  mpid=$!
+
+  id=""; name=""
+  for _ in $(seq 1 40); do
+    read -r id name < <(pending "$host" | head -1)
+    [ -n "${id:-}" ] && break
+    sleep 0.5
+  done
+  if [ -z "${id:-}" ]; then
+    kill "$mpid" 2>/dev/null
+    die "对端没出现待配对请求，看下 $host 的 Sunshine 日志"
+  fi
+
+  local body
+  body=$(python3 -c 'import json,sys; print(json.dumps({"pairing_id":sys.argv[1],"pin":sys.argv[2],"name":sys.argv[3]}))' \
+           "$id" "$pin" "${name:-$(hostname)}")
+  echo "==> 提交 PIN（客户端显示名：${name:-$(hostname)}）"
+  curl -sk -u "$CRED" -X POST "https://$host:$PORT/api/pin" \
+    -H 'Content-Type: application/json' -d "$body"; echo
+
+  # 配对协议完成后 Sunshine 会把待配对项清掉；moonlight pair 自身不退出，得手动收
+  for _ in $(seq 1 30); do
+    [ -z "$(pending "$host" | head -1)" ] && break
+    sleep 0.5
+  done
+  sleep 2
+  kill "$mpid" 2>/dev/null
+  wait "$mpid" 2>/dev/null
+
+  out=$(timeout 30 moonlight list "$host" 2>&1)
+  if grep -qi "has not been paired" <<<"$out"; then
+    echo "$out" >&2
+    echo "--- moonlight 日志尾部 ---" >&2
+    tail -5 "$LOG" >&2
+    die "配对失败"
+  fi
+  echo "==> 配对成功。$host 上的应用："; echo "$out"
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    peer)   [ -n "$PEER" ] || die "认不出本机 $(hostname)，请用 PC_REMOTE_PEER 指定对端"; echo "$PEER" ;;
+    pair)   cmd_pair "${1:-$PEER}" ;;
+    list)   timeout 30 moonlight list "${1:-$PEER}" ;;
+    stream)
+      local h="${1:-$PEER}" a="${2:-$APP}" log rc br args=()
+      log="${XDG_RUNTIME_DIR:-/tmp}/pc-remote-stream.log"
+      br="${PC_REMOTE_BITRATE:-}"
+      if [ -z "$br" ]; then
+        case "$h" in
+          # 笔记本作主机时视频走它的 WiFi 上行，实测被路由器限到 ~1000 包/秒
+          # (≈11Mbps @1400B)：默认 15Mbps 会丢 ~20% 包并最终 Control stream 超时掉线。
+          # 压到 8Mbps 后 0 丢包。台式机作主机不受影响，保持自动码率。
+          192.168.144.186|yancc-arcolinux*) br=8000 ;;
+        esac
+      fi
+      [ -n "$br" ] && args=(--bitrate "$br")
+      echo "pc-remote: host=$h app=$a${br:+ bitrate=${br}kbps}  (日志: $log)" >&2
+      moonlight stream "$h" "$a" "${args[@]}" 2>&1 | tee "$log"
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "pc-remote: 串流结束 rc=$rc，最后几行 ——" >&2
+        tail -10 "$log" >&2
+      fi
+      exit "$rc"
+      ;;
+    gui)    exec moonlight ;;
+    *)      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  esac
+}
+
+main "$@"

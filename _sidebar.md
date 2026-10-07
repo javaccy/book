@@ -4,6 +4,7 @@
   * [redsocks 全局代理](src/yancc/linux/redsocks/ssh-scoks-redsocks.md)
   * [鼠标/蓝牙鼠标设置](src/yancc/linux/mouse/mouse.md)
   * [键盘映射 hwdb](src/yancc/linux/hwdb/hwdb.md)
+  * [远程桌面 Sunshine + Moonlight](src/yancc/linux/远程桌面.md)
 * [arcolinux](src/yancc/arcolinux.md)
 * [archlinux](src/yancc/archlinux.md)
 * [PlantUML 画图](src/yancc/plantuml.md)
