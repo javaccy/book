@@ -317,19 +317,24 @@ CEC_WAKE_CMD="${TCL_CEC_WAKE_CMD:-ssh -o BatchMode=yes -o ConnectTimeout=5 yancc
 所以现在**遥控器关机也不怕**：`tv-cast on` 会自己把电视叫起来再开播。
 日志里能看到 `adb 连不上，尝试 HDMI-CEC 唤醒: ssh ...` 这一行。
 
-### 单独的开机脚本 `tv-on.sh`
+### 单独的开机 / 关机脚本 `tv-on.sh` / `tv-off.sh`
 
-只想"把电视点亮"、不想投屏时用 `~/apps/tv/tv-on.sh`（`~/.local/bin/tv-on.sh` 软链已在 PATH 里）：
+只想"开关电视"、不投屏时用这两个（软链已在 `~/.local/bin`，PATH 里能直接敲）：
 
 ```bash
 tv-on.sh           # 开机/唤醒（已经亮着就直接退出）
+tv-off.sh          # 关到待机（串流中会先正常断流并恢复本机分辨率）
 tv-on.sh status    # 只看状态，不做操作（exit 0=Awake 1=屏保 2=离线）
+tv-off.sh status   # 同上（转调 tv-on.sh status）
 ```
 
-三种状态分别处理：已亮 → 什么都不做；画报屏保（`mWakefulness=Dreaming`，网络通）→ adb 发 `KEYCODE_WAKEUP`；
+`tv-on.sh` 三种状态分别处理：已亮 → 什么都不做；画报屏保（`mWakefulness=Dreaming`，网络通）→ adb 发 `KEYCODE_WAKEUP`；
 整机待机（adb 完全连不上）→ 树莓派 HDMI-CEC。实测：0.3 秒 / 4 秒 / 11 秒。
 
-日志在 `~/apps/tv/tv-on.log`。
+`tv-off.sh` 发 `KEYCODE_POWER` 进待机，发完等它 adb+ping 都不通才算成功；本来就关着就直接退出（幂等）。
+实测空闲 15 秒、串流中 18 秒（先 `tv-cast off` 断流+恢复分辨率再关机）。
+
+日志分别在 `~/apps/tv/tv-on.log` 和 `tv-off.log`。
 
 ### 踩过的东西
 

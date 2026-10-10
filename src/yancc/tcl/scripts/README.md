@@ -6,16 +6,18 @@
 |------|------|
 | `tv-cast` | 一键开/关电视上的 Moonlight 串流。adb 驱动电视端自动点击（PcView → 电脑卡片 → AppView 回车 → 恢复串流回车），带前台校验和重试；桌面有 mako 通知 |
 | `tv-on.sh` | **只把电视弄亮**（不碰 Moonlight）。已亮→直接退出；画报屏保→`KEYCODE_WAKEUP`；整机待机→树莓派 HDMI-CEC 唤醒 |
+| `tv-off.sh` | **把电视关到待机**（等于遥控器电源键）。串流中会先正常断开 + 恢复本机分辨率；本来就关着则直接退出 |
 | `tv-mode.sh` | 串流期间把本机屏幕临时切成 16:9（避免电视两侧黑边），结束恢复首选模式 |
 
 ## 安装（两台机器同一份）
 
 ```bash
 mkdir -p ~/apps/tv ~/.local/bin
-cp tv-cast tv-on.sh tv-mode.sh ~/apps/tv/
-chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-mode.sh
-ln -sf ~/apps/tv/tv-cast  ~/.local/bin/tv-cast     # 让脚本能直接敲（笔记本的 ~/.local/bin
-ln -sf ~/apps/tv/tv-on.sh ~/.local/bin/tv-on.sh    #  是写在 ~/.zshenv 的 PATH 里的）
+cp tv-cast tv-on.sh tv-off.sh tv-mode.sh ~/apps/tv/
+chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh
+for s in tv-cast tv-on.sh tv-off.sh; do       # 让脚本能直接敲（笔记本的 ~/.local/bin
+  ln -sf ~/apps/tv/$s ~/.local/bin/$s         #  是写在 ~/.zshenv 的 PATH 里的）
+done
 ```
 
 ## 用法
@@ -25,11 +27,13 @@ tv-cast            # 开/关切换
 tv-cast on         # 只在电视上开播（电视关着会自动 CEC 唤醒）
 tv-cast off        # 只在电视上退出（回电视桌面）
 tv-on.sh           # 只把电视点亮（不投屏），想远程开机就用它
+tv-off.sh          # 把电视关到待机（串流中会先正常断流 + 恢复本机分辨率）
 tv-on.sh status    # 只看状态：Awake / Dreaming(屏保) / 离线，exit 0/1/2
 tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
+`tv-off.sh` 空闲时 15 秒关机；串流中 18 秒（先断流、把分辨率从 1920x1080 恢复到 3440x1440，再关机）；电视已经关着则秒退。
 
 常用环境变量：`TCL_TV_ADDR`（默认 `192.168.144.188:5555`）、`TCL_PC_NAME`（默认 `$(hostname)`，
 即 PcView 里要点的电脑卡片名）、`TCL_TV_MAC`（设了才会在 adb 掉线时补发 WOL）、`TCL_VIDEO_APPS`
@@ -62,6 +66,7 @@ tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
 ```lua
 Bind("SUPER + F12", "exec tv-cast")      # 开/关投屏
 Bind("SUPER + F11", "exec tv-on.sh")     # 只开电视
+Bind("SUPER + F10", "exec tv-off.sh")    # 只关电视
 ```
 
 踩坑提醒：
