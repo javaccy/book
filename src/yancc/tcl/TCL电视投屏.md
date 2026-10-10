@@ -96,6 +96,7 @@ adb -s 192.168.144.188:5555 shell pm install -r /data/local/tmp/moonlight.apk
 
 ## 日常使用
 
+- **开电视**：`tv-on.sh`（只点亮，不投屏）
 - **开投屏**：遥控器打开 Moonlight → 点 `yancc-arcolinux` → 自动开始串流桌面
 - **退出**：遥控器返回键
 - **调画质**：Moonlight 设置 → 视频分辨率/码率（默认 1080p；电视是 4K，5GHz WiFi 下可直接拉 4K HEVC）
@@ -315,6 +316,20 @@ CEC_WAKE_CMD="${TCL_CEC_WAKE_CMD:-ssh -o BatchMode=yes -o ConnectTimeout=5 yancc
 
 所以现在**遥控器关机也不怕**：`tv-cast on` 会自己把电视叫起来再开播。
 日志里能看到 `adb 连不上，尝试 HDMI-CEC 唤醒: ssh ...` 这一行。
+
+### 单独的开机脚本 `tv-on.sh`
+
+只想"把电视点亮"、不想投屏时用 `~/apps/tv/tv-on.sh`（`~/.local/bin/tv-on.sh` 软链已在 PATH 里）：
+
+```bash
+tv-on.sh           # 开机/唤醒（已经亮着就直接退出）
+tv-on.sh status    # 只看状态，不做操作（exit 0=Awake 1=屏保 2=离线）
+```
+
+三种状态分别处理：已亮 → 什么都不做；画报屏保（`mWakefulness=Dreaming`，网络通）→ adb 发 `KEYCODE_WAKEUP`；
+整机待机（adb 完全连不上）→ 树莓派 HDMI-CEC。实测：0.3 秒 / 4 秒 / 11 秒。
+
+日志在 `~/apps/tv/tv-on.log`。
 
 ### 踩过的东西
 
