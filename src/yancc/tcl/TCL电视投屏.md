@@ -2,7 +2,8 @@
 
 > 环境：笔记本 yancc-arcolinux（ArcoLinux + Hyprland/Wayland，AMD Phoenix APU）
 > 电视：TCL 98P11K（192.168.144.188，Android 11）—— 装 APK 的坑见同目录《TCL电视.md》
-> 日期：2026-10-06 搭建完成，已实测稳定串流
+> 树莓派：yancc@192.168.144.229（Pi 4B，HDMI 接电视 HDMI2）—— 用来做 HDMI-CEC 远程开机
+> 日期：2026-10-06 搭建完成，已实测稳定串流；2026-10-10 补上 CEC 远程开机
 
 ## 方案选型结论
 
@@ -257,29 +258,84 @@ adb -s 192.168.144.188:5555 shell "cmd wifi connect-network GL-KULUOBO wpa3 '密
 ```
 
 > 待机时网卡一起断电，所以"双网在线"对开机没帮助——只在电视开着时有意义（两条 adb 路可互为冗余）。
+> 真正的远程开机走 HDMI-CEC，见下一节。
 
-## 待办：HDMI-CEC 远程开机（等树莓派接上再做）
+## HDMI-CEC 远程开机（已实现，2026-10-10）
 
-思路：树莓派常开 + HDMI 线接电视，用 HDMI-CEC 发 "Image View On" 叫醒电视。
-CEC 是独立**常电**信号线路（待机也在听），这正是它比 WOL 靠谱的原因。
+**结论：能用。** 树莓派常开 + HDMI 接电视，发一条 CEC `IMAGE_VIEW_ON` 就能把待机的电视点亮。
+实测：关机后安静等 20 秒（ping 全失败）→ 发一次 → **5 秒内亮屏**；`tv-cast on` 全自动走完
+（唤醒 + 开播）约 **53 秒**（大头是电视冷启动）。
 
-1. **树莓派**：装 `cec-utils`（Arch ARM）/ `apt install cec-utils`，然后
-   ```bash
-   echo "on 0" | cec-client -s -d 1     # on 0 = 对逻辑地址 0（电视）发 Image View On
-   ```
-   走内核 CEC 接口的等价写法：`cec-ctl -d /dev/cec0 --playback --image-view-on`。
-   注意 **Pi 5 上 libcec 支持有问题**，Pi 4 及以下稳妥。
-2. **电视端**（要电视开着时用 adb 改，当前 `hdmi_control_auto_wakeup_enabled=0`，`hdmi_control_enabled=1`）：
-   ```bash
-   adb -s 192.168.144.188:5555 shell settings put global hdmi_control_auto_wakeup_enabled 1
-   ```
-   对应菜单大致是 设置 → 通用 → HDMI 控制（这台设置菜单只有 图像/声音/网络/蓝牙/信号源/AI智能/通用/个性化/关于，
-   而且**只吃方向键、不响应触摸**，用 `input tap` 点不动）。
-3. **接到 `tv-cast`**：在 `ensure_adb` 里"3 次快速重试 + WOL"都失败之后，执行 `TCL_CEC_WAKE_CMD`
-   （例：`ssh pi@192.168.144.x 'echo "on 0" | cec-client -s -d 1'`），再轮询等 adb 上线。
-   > 这段代码之前写过一版（`cec_wake()` + 抽出 `wait_adb()` 轮询），当时按需求回退了，要做时照同样思路加回即可。
-   > 注意保留原来的快路径：先原地 `adb connect` 试 3 次（各隔 1 秒），别一上来就 `sleep 2`，否则电视开着时白等。
-4. **验证**：遥控器关机 → `tv-cast on` → 电视被 CEC 叫醒并直接开播。
+### 硬件 / 环境
 
-排查：CEC 不生效常见原因是电视「HDMI 控制」没开、树莓派那个 HDMI 口从没被电视识别过（先在电视上手动切过去激活一次）、
-或者电视待机模式设成了最省电那档（会连 CEC 接收一起关掉）。
+| 项 | 值 |
+|----|----|
+| 树莓派 | `yancc@192.168.144.229`，Raspberry Pi 4 Model B Rev 1.5，内核 6.12.75 |
+| CEC 适配器 | `/dev/cec0` = `vc4-hdmi-0`，对应 `card1-HDMI-A-1`，电视给的物理地址 `2.0.0.0`（= 电视的 **HDMI2** 口） |
+| CEC 工具 | `cec-ctl`（v4l-utils 1.22.1）。树莓派上没装 `cec-client`，用 `cec-ctl` 就够 |
+| 权限 | `yancc` 在 `video` 组，能直接读写 `/dev/cec0` |
+
+`/dev/cec1` 是另一个 HDMI 口（物理地址 `f.f.f.f` = 没接东西），别用错，`cec-ctl --list-devices` 可确认。
+
+### 电视端设置（关键）
+
+```bash
+adb -s 192.168.144.188:5555 shell settings put global hdmi_control_auto_wakeup_enabled 1
+```
+
+**这个开关是成败关键。** 默认 `0` 时电视待机连 CEC 消息都不 ACK（`Tx, Not Acknowledged (4), Max Retries`），
+发多少次都唤不醒；改成 `1` 之后立刻就好使。`hdmi_control_enabled` 本来就是 `1`，不用动。
+（另有 prop `ro.feature.power_cec_screen_on_control=true`，说明这机型本来就有 CEC 亮屏能力。）
+
+顺带一个有意思的实测结果：电视待机时 **HDMI 链路是活的**——`card1-HDMI-A-1 status=connected`、EDID 能读到 256 字节，
+但网卡（有线+WiFi）全断。也就是说待机时 HDMI 的 +5V/HPD 还留着，CEC 才有戏；
+而 `hdmi_control_auto_wakeup_enabled=0` 那会儿 CEC 接收端是关着的。
+
+### 唤醒命令
+
+```bash
+ssh yancc@192.168.144.229 "cec-ctl -d0 --playback -t 0 --image-view-on"
+```
+
+- `-d0` = `/dev/cec0`（HDMI-A-1 那个口）
+- `--playback` = 认领 Playback 逻辑地址（LA 4）；不发这个会报 `attempting to send message without --to`
+- `-t 0` = 发给电视（逻辑地址 0）。**必须带 `-t`**，不带的话 `--image-view-on` 根本不会发出去
+- `--image-view-on` = `IMAGE_VIEW_ON (0x04)`，就是"一键播放"里的点亮屏幕
+- 一条就够。`cec-ctl` 一退出逻辑地址就释放了，所以每次唤醒都重新 `--playback`
+
+### 接到 `tv-cast`
+
+`ensure_adb` 现在是：原地 `adb connect` 试 3 次 → WOL（需设 `TCL_TV_MAC`）→ **CEC 唤醒**（最多补发 3 次，每次等 10 秒），
+唤醒成功后还会等 `sys.boot_completed=1`（冷启动时 **adbd 比 UI 先就绪**，不等的话点击会被丢掉）。
+默认命令写在脚本里，可用 `TCL_CEC_WAKE_CMD` 覆盖（设成空字符串即禁用）：
+
+```bash
+CEC_WAKE_CMD="${TCL_CEC_WAKE_CMD:-ssh -o BatchMode=yes -o ConnectTimeout=5 yancc@192.168.144.229 'cec-ctl -d0 --playback -t 0 --image-view-on'}"
+```
+
+所以现在**遥控器关机也不怕**：`tv-cast on` 会自己把电视叫起来再开播。
+日志里能看到 `adb 连不上，尝试 HDMI-CEC 唤醒: ssh ...` 这一行。
+
+### 踩过的东西
+
+- **两台机器都要能免密 ssh 到树莓派**。台式机本来就行；笔记本先是 `Host key verification failed`（known_hosts 里没有），
+  补 `ssh-keyscan` 后又 `Permission denied`（公钥没授权），把笔记本的 `~/.ssh/id_rsa.pub` 追加到
+  树莓派 `~/.ssh/authorized_keys` 就好了。
+- 电视设置菜单**只吃方向键、不响应触摸**（`input tap` 点不动），要手改的话记得用 DPAD。
+- Pi 5 上 libcec/`cec-client` 支持有坑，Pi 4 及以下稳妥；这里用的是内核 CEC 接口（`cec-ctl`），跟 libcec 无关。
+- 关机后**马上**发 CEC 有被"关机过程中"吃掉的风险，脚本里失败会自动补发，不用管。
+- **冷启动整条链路 44~104 秒**（`tv-cast on` 从关机状态开始）：其中电视从亮屏到 `boot_completed` 占大头，
+  所以别指望"秒开"。电视醒着的时候（画报屏保）还是 12~15 秒。
+
+### 两个实测踩到的坑（都已修）
+
+1. **`dumpsys window` 偶发 broken pipe**，`foreground()` 会返回空。空值被状态机当成"换了前台"就会重置 `prev`，
+   于是反复去点卡片，把刚弹出的"恢复串流"对话框又点掉——表现就是日志里 `tap 'xxx' @ 坐标` 每 10 秒重复一次、
+   最后停在 PcView。修法：`foreground()` 空值重试 3 次；真空值时**不要**重置 `prev`（只 `sleep`）。
+2. **主机离线时点开的不是"恢复串流"，而是上下文菜单**："`<电脑名> - 离线` / 发送 Wake-On-LAN 请求 /
+   NVIDIA GameStream 终止服务 / 测试网络连接 / 删除电脑 / 查看详情"，默认选中第一项。
+   这时候怎么按都进不去，旧版会空转 40 轮。现在脚本会 dump 一次看有没有"离线"字样，
+   有就直接报错并弹通知（"xx 离线，检查 Sunshine 是否在运行"）。
+
+   这次就是这么发现的：笔记本上 Sunshine 服务是 `inactive (dead)`（`systemctl --user start app-dev.lizardbyte.app.Sunshine.service` 起来就好了），
+   而 Moonlight 的 PcView 里那台电脑**照样会显示**，只是标着"离线"。

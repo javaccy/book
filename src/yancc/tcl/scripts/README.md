@@ -40,7 +40,19 @@ tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
   （笔记本写在 `~/.zshenv` 的 PATH 里；脚本自己也有兜底查找顺序）。
 - 电视进「画报」屏保时脚本会先发 `KEYCODE_WAKEUP`，不用遥控器按返回键。
 
-## 已知限制
+## 遥控器关机后的远程开机（HDMI-CEC）
 
-- **遥控器关机后无法网络唤醒**：这台电视待机时整机断电（有线+WiFi 的 ARP 都不回），WOL 无效。
-  计划用树莓派 + HDMI-CEC 解决，方案和步骤见文档末尾「待办：HDMI-CEC 远程开机」。
+电视待机时整机断电（有线+WiFi 的 ARP 都不回），WOL 无效，**只能靠 HDMI-CEC**：
+树莓派常开、HDMI 接电视，`ensure_adb` 在 adb 连不上时会 ssh 过去发一条 `IMAGE_VIEW_ON` 把电视点亮。
+
+- 默认命令：`ssh -o BatchMode=yes yancc@192.168.144.229 'cec-ctl -d0 --playback -t 0 --image-view-on'`
+- 用 `TCL_CEC_WAKE_CMD` 覆盖（设成空字符串即禁用）
+- 前提：电视端 `hdmi_control_auto_wakeup_enabled=1`，且机器能免密 ssh 到树莓派
+
+细节、实测数据和排查见文档「HDMI-CEC 远程开机（已实现）」一节。
+
+踩坑提醒：
+
+- 冷启动时 adbd 比 UI 先就绪，脚本会等 `sys.boot_completed=1` 再操作，所以从关机到开播要 44~104 秒
+- Moonlight 里电脑显示"**离线**"= 主机的 Sunshine 没跑（服务 `app-dev.lizardbyte.app.Sunshine.service`）。
+  脚本现在会识别这种上下文菜单并直接报错，不再空转

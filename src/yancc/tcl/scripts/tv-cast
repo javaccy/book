@@ -6,6 +6,10 @@
 #   tv-cast on     只在电视上开播
 #   tv-cast off    只在电视上退出
 #
+# 环境变量: TCL_TV_ADDR / TCL_TV_MAC / TCL_PC_NAME / TCL_VIDEO_APPS / ADB
+#   TCL_CEC_WAKE_CMD  adb 完全连不上时，用 HDMI-CEC 让常开设备把电视叫醒，
+#                     例如树莓派: ssh pi@192.168.144.x 'echo "on 0" | cec-client -s -d 1'
+#
 # 参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
 set -uo pipefail
 
@@ -18,6 +22,10 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 STATE="$RUNTIME_DIR/tv-cast.state"
 # 电视自带的影视 App，会主动把前台抢回去（见 TCL电视投屏.md），开播时要摁住
 TCL_VIDEO_APPS="${TCL_VIDEO_APPS:-com.xiaodianshi.tv.yst com.tcl.qiyiguo}"
+# 电视待机时整机断电，网络全断，只能靠 CEC 唤醒（见 TCL电视投屏.md「HDMI-CEC 远程开机」）。
+# 默认走树莓派：树莓派常开、HDMI 接电视 HDMI2，发一次 Image View On 就能亮屏（实测 ~5 秒）。
+# 前提：电视端 hdmi_control_auto_wakeup_enabled=1；两台机器都对树莓派免密。
+CEC_WAKE_CMD="${TCL_CEC_WAKE_CMD:-ssh -o BatchMode=yes -o ConnectTimeout=5 yancc@192.168.144.229 'cec-ctl -d0 --playback -t 0 --image-view-on'}"
 
 # adb：优先用 $ADB，其次 PATH，最后兜底到常见的 SDK 目录
 # （ssh / systemd 这类非交互环境的 PATH 里常常没有 adb）
@@ -53,7 +61,7 @@ PY
 }
 
 ensure_adb() {
-  local i
+  local i n
   for i in 1 2 3; do
     "$ADB" connect "$TV" >/dev/null 2>&1
     [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
@@ -61,12 +69,38 @@ ensure_adb() {
   done
   if wake_on_lan; then
     log "adb 未连接，已发 WOL，等待电视上线"
-    for i in $(seq 1 8); do
-      sleep 2
-      "$ADB" connect "$TV" >/dev/null 2>&1
-      [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
-    done
+    wait_adb 8 && return 0
   fi
+  # 树莓派发一次 Image View On 就够了（实测待机→亮屏 ~5 秒），失败再补发
+  for n in 1 2 3; do
+    cec_wake || break
+    if wait_adb 5; then wait_boot; return 0; fi
+  done
+  return 1
+}
+
+# 轮询等电视的 adb 上线（$1=轮数，每轮 2 秒）
+wait_adb() {
+  local i
+  for i in $(seq 1 "${1:-8}"); do
+    sleep 2
+    "$ADB" connect "$TV" >/dev/null 2>&1
+    [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
+  done
+  return 1
+}
+
+# HDMI-CEC 唤醒：电视待机时网卡也断电（实测两个 IP 的 ARP 都不回），WOL 无效；
+# CEC 是独立常电线路，由常开设备（树莓派）发 Image View On 把电视叫醒（实测 ~5 秒）。
+# 前提：电视端 hdmi_control_auto_wakeup_enabled=1（否则待机时连 CEC 消息都不 ACK）。
+cec_wake() {
+  [ -n "$CEC_WAKE_CMD" ] || return 1
+  log "adb 连不上，尝试 HDMI-CEC 唤醒: $CEC_WAKE_CMD"
+  if sh -c "$CEC_WAKE_CMD" >/dev/null 2>&1; then
+    sleep 2
+    return 0
+  fi
+  log "HDMI-CEC 唤醒命令执行失败"
   return 1
 }
 
@@ -112,10 +146,28 @@ tap_resume() {
 }
 
 # 当前焦点窗口，形如 com.limelight/com.limelight.Game 或 AtchDlg:com.limelight/com.limelight.AppView
+# dumpsys window 偶发 broken pipe（输出为空），空值会被状态机误判成"换了前台"进而重按，
+# 把刚弹出来的对话框又点掉，所以空值要重试几次。
 foreground() {
-  adb_tv shell dumpsys window 2>/dev/null \
-    | grep -m1 -o 'mCurrentFocus=Window{[^}]*}' \
-    | sed -E 's/^mCurrentFocus=Window\{[^ ]+ //; s/^u[0-9]+ //; s/\}$//'
+  local i f
+  for i in 1 2 3; do
+    f="$(adb_tv shell dumpsys window 2>/dev/null \
+      | grep -m1 -o 'mCurrentFocus=Window{[^}]*}' \
+      | sed -E 's/^mCurrentFocus=Window\{[^ ]+ //; s/^u[0-9]+ //; s/\}$//')"
+    [ -n "$f" ] && { printf '%s\n' "$f"; return 0; }
+    sleep 0.4
+  done
+  return 1
+}
+
+# 冷启动 / CEC 唤醒后 adbd 比 UI 先就绪，太早操作点击会被丢掉；等系统真正 boot_completed。
+wait_boot() {
+  local i
+  for i in $(seq 1 30); do
+    [ "$(adb_tv shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && { sleep 2; return 0; }
+    sleep 2
+  done
+  return 1
 }
 
 fg_is() { case "$(foreground)" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
@@ -163,12 +215,23 @@ cast_on() {
   sleep 0.3
   adb_tv shell "am start -n com.limelight/.PcView" >/dev/null 2>&1
 
-  local ok=0 i f prev="" menu_tries=0
+  local ok=0 i f prev="" menu_tries=0 offline_checked=0
   for i in $(seq 1 40); do
     f="$(foreground)"
     case "$f" in
       *Game*) ok=1; break ;;
       *AtchDlg*)
+        # 主机离线时点开的是上下文菜单（"xxx - 离线 / 发送 Wake-On-LAN 请求 / 删除电脑…"），
+        # 不是"恢复串流"，怎么按都进不去，早点报错比空转 40 轮强
+        if [ "$offline_checked" != 1 ]; then
+          offline_checked=1
+          if ui_nodes | grep -q "离线"; then
+            log "电脑 '$PC_NAME' 在 Moonlight 里是离线状态（Sunshine 没开或不可达）"
+            note "投屏失败" "$PC_NAME 离线，检查 Sunshine 是否在运行"
+            adb_tv shell input keyevent KEYCODE_BACK >/dev/null 2>&1
+            return 1
+          fi
+        fi
         menu_tries=$((menu_tries + 1))
         if [ "$menu_tries" -le 2 ]; then
           adb_tv shell input keyevent DPAD_CENTER
@@ -198,10 +261,13 @@ cast_on() {
           adb_tv shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1
           adb_tv shell "am start -n com.limelight/.PcView" >/dev/null 2>&1
           sleep 1
+          prev=""
         else
+          # 注意别在这里重置 prev：foreground 空值是 dumpsys 抖动，不是真的换了前台，
+          # 重置会让下一轮又去点卡片，把刚弹出的"恢复串流"对话框点掉。
           sleep 0.4
         fi
-        prev="" ;;
+        ;;
     esac
     sleep 0.3
   done
