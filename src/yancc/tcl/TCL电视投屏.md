@@ -341,6 +341,63 @@ tv-play -t 3 --size 1280x720 -q 23 电影.mkv   # 烧字幕时顺带缩放 + 调
 跑个 DLNA MediaServer（minidlna 之类）让电视自己在"多屏互动/媒体中心"里浏览播放 —— 适合整个片库，
 但遥控器选片不如命令行直接，也没实测。
 
+## 在电脑上看电视画面（adb 抓屏，2026-10-11）
+
+**结论：能用，但是幻灯片，不是流畅视频。** 脚本：**`tv-view`**（`~/apps/tv/`，python3）。
+
+```bash
+tv-view                    # 开个浮动小窗看电视画面（约 1 帧/秒）
+tv-view --time 30          # 看 30 秒自动退出
+tv-view --full             # 全屏
+tv-view -s 1280x720        # 窗口大小（需要下面的 Hyprland 规则配合）
+tv-view shot [文件]        # 只截一张图（默认 ~/Pictures/tv-<时间>.png）
+tv-view --scrcpy           # 用 scrcpy（要先装，能鼠标键盘直接操作电视）
+```
+
+原理：`adb exec-out screencap -p` 一帧帧抓，塞进 `ffplay` 当图像流播（`-f image2pipe`）。
+
+### 为什么不是流畅视频（都实测过）
+
+| 路子 | 结果 |
+|------|------|
+| **`screencap` 抓屏（本方案）** ✅ | 电视 UI / 菜单 / app 界面都能抓，一帧约 0.9 秒（1080p PNG ≈ 250 KB）→ **~1 帧/秒**，看操作够用，看视频就是幻灯片 |
+| `screenrecord` | ❌ **这台电视上是坏的**：录 4 秒还是 20 秒、输出到 stdout 还是电视本地文件、屏幕亮着还是待机，永远只出 **1 帧**（`nb_frames=1`）；`--output-format=h264` 也不流式吐，文件只在停止后一次性变大 |
+| MTK 的 `mtk_screenrecord` | ❌ `--enable-mfe`（直接编视频层）被 **SELinux** 挡住（shell 拿不到 `vendor.mediatek.tv.screenrecord` HAL，`avc: denied … tclass=hwservice_manager`）；`--disable-mfe` 又卡 `createAudioCaptureSource failed`；`adb root` 被 production build 拒绝 |
+| Moonlight 串流回来看 | ❌ 那是把电脑投到电视，方向反了 |
+| `scrcpy` | ⚠️ 没装、**没实测**。走 MediaCodec 是另一条链路，但**视频层大概率还是黑的**（mt5879 的视频是 MTK MFE 硬件层，不走 SurfaceFlinger 合成，所以连 vendor 工具都要 `--enable-mfe` 才能抓），可以拿它当"能用鼠标键盘操作电视 UI"的替代品 |
+| HDMI 采集卡 | ❌ 电视只有 HDMI **输入**口，没有视频输出，采集卡无从接起 |
+
+- **硬件解码的视频层抓不到**：DLNA 播 1080p 片子时抓出来**全黑**（源是彩条 YAVG=128 → 抓下来 YAVG=0），
+  遥控器/菜单却正常；320x240 的小片子能抓到。所以这套只能看界面，看不了正在播的片子本身。
+- **帧率跟着画面复杂度走**：JSON 的 250 KB → ~1 帧/秒；画报屏保那种花屏（PNG 1.7 MB）→ **0.4 帧/秒**，
+  而且电视端编码就吃掉 2.5 秒。所以查看器大约滞后画面 1~4 秒，属正常。
+
+### 实现踩坑（都在脚本里绕过了）
+
+1. **播放器要连收好几帧才肯建窗口**，跟分辨率无关：mpv 要 **7 帧**、ffplay 要 **3 帧**。截图流只有 1 帧/秒
+   → 先干等好几秒没有任何反应，看着像卡死。
+   绕法：连上播放器后把抓到的**第一帧重复灌 8 遍**（同一画面，肉眼看不出）。
+2. **`-framerate` 得调大（脚本用 25）**：默认 2 的话，预热帧会被播放器按 0.5 秒/张慢放，画面要 8 秒才出来；
+   调到 25 后 ~1.5 秒出窗口、~4 秒出画面（这台机器没 `/dev/dri`，ffplay 建 GL 上下文用软件渲染，本身要 ~2 秒）。
+3. **mpv 在这个场景会冻帧**：管道读 `image2pipe` 时它建完窗就停在第一帧不动（`--cache-pause=no` 也只是偶尔跟一下，
+   `--no-cache --untimed` 一样），所以**用 ffplay，不用 mpv**（同样喂法实测能持续跟随）。
+4. **Hyprland 平铺会覆盖窗口尺寸** → `-s/--size` 不起作用。两台机器的 `~/.config/hypr/hyprland.lua` 里加了一条：
+
+   ```lua
+   hl.window_rule({
+       name  = "float-tv-view",
+       match = { class = "^(mpv|ffplay)$", title = "^电视画面$" },
+       float = true, center = true, no_anim = true,
+   })
+   ```
+
+   不想要浮动窗口的话删掉这条，或者直接用 `--full`。
+
+### 其它
+
+- 电视在画报屏保/待机时也能抓（画面就是屏保内容）；电视整机待机（网络断了）时 `tv-view` 会提示先 `tv-on.sh`。
+- 只想快速看一眼：`tv-view shot` 会存到 `~/Pictures/tv-<时间>.png`。
+
 ## TCL 电视的前台抢占规律（重要）
 
 - 第三方 App 打开后 **3~5 秒**会被系统拉回"小电视影视"（yst）或启动器，adb 注入的按键**不重置**这个计时器

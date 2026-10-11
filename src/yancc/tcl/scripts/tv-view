@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""在本机的窗口里看 TCL 电视的画面（adb 抓屏，不碰电视的投屏/渲染器）。
+
+用法:
+  tv-view                  开个窗口看（默认约 1 帧/秒，见下「为什么不是流畅视频」）
+  tv-view --time 30        看 30 秒自己退出（默认一直看，关窗口/Ctrl-C 结束）
+  tv-view --full           全屏
+  tv-view -s 1280x720      窗口大小（默认 1280x720）
+  tv-view shot [文件]      截一张图（默认 ~/Pictures/tv-<时间>.png）
+  tv-view --scrcpy         用 scrcpy（要先装），能鼠标键盘直接操作电视
+  tv-view --capture        强制用截图流（约 1 帧/秒）
+  tv-view --addr 192.168.1.5:5555    换电视地址
+
+为什么不是流畅视频（2026-10-11 在 TCL mt5879 / Android 11 上实测）:
+  * `screencap` 正常，能抓电视 UI / 菜单 / app 界面 —— shot 和 live 都走这条。
+  * `screenrecord` **是坏的**：不管录 4 秒还是 20 秒、输出到 stdout 还是电视本地文件、
+    屏幕亮着还是待机，永远只出 1 帧（1080p 单帧 42~53 KB，`nb_frames=1`）→ 做不了实时视频。
+  * MTK 自带的 `mtk_screenrecord`（有 `--enable-mfe` 直接编视频层、`--output-format ts` 流式格式）
+    也试过：`--enable-mfe` 被 SELinux 挡住（shell 不能用 vendor.mediatek.tv.screenrecord HAL），
+    `--disable-mfe` 卡在 `createAudioCaptureSource failed`（shell 没有抓音频权限）；电视是
+    production build，`adb root` 直接拒绝 → 这条路也没了。
+  * `screencap` 一帧约 0.9 秒（1920x1080 PNG ≈ 250 KB，瓶颈是电视端的 PNG 编码 + adb 传输）
+    → 只能刷到 ~1 帧/秒：看菜单/状态/操作够用，看视频内容就是幻灯片。
+  * **硬件解码的视频层抓不到**：DLNA 播 1080p 片子时抓出来全黑（源是彩条 YAVG=128，抓下来 YAVG=0），
+    遥控/菜单却正常。小分辨率片子（320x240）能抓到，跟解码路径有关（MTK 的 MFE 视频层不走
+    SurfaceFlinger 合成，所以要 vendor 的 mtk_screenrecord --enable-mfe 才能抓）。
+  * 结论：想在这台电视上看**流畅**画面，只剩两条路 —— 装 scrcpy 试（MediaCodec 走另一条链路，
+    没实测；即使能跑，视频层大概率还是黑的）或者用采集卡接电视输出（电视没有 HDMI 输出，
+    基本不可行）。默认的 screencap 流是「不用装任何东西」的方案。
+
+实现坑（2026-10-11 实测，都是「往播放器 stdin 灌一串 PNG」这条路）：
+  * 播放器要连收几帧才肯建窗口（mpv 要 7 帧，ffplay 要 3 帧左右），且跟分辨率无关。
+    截图流只有 ~1 帧/秒 → 先干等好几秒没有任何反应，看着像卡死。
+    绕法：连上播放器后先把抓到的第一帧**重复灌 8 遍**（同一画面，肉眼看不出），窗口 ~1.5 秒就出来；
+    再把 `-framerate` 调到 25，否则预热帧会被播放器按 0.5 秒/张慢放，窗口要 8 秒才出来
+    （台式机没 /dev/dri，ffplay 建 GL 上下文是软件渲染，画面比窗口还要再晚 ~2 秒）。
+  * **mpv 会冻帧**：管道读 `image2pipe` 时，它建完窗就停在第一帧不动（`--cache-pause=no` 也只是
+    偶尔跟一下）；`--no-cache --untimed` 也一样。所以这里用 **ffplay**（同样喂法实测能持续跟随）。
+  * 顺手把 lavf 的 probe 关掉（`-analyzeduration 0 -probesize 32768`），免得它为了找流信息先多读 1MB。
+
+参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
+"""
+
+import argparse
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import tv_dlna as d                                    # noqa: E402
+
+TAG = "tv-view"
+MIN_PNG = 1000                                         # 小于这个字节数当截图失败
+WARMUP_FRAMES = 8                                      # 见文件头「实现坑」：播放器要连收几帧才建窗
+
+
+def parse_size(text):
+    parts = str(text).lower().replace("x", " ").split()
+    if len(parts) != 2:
+        raise SystemExit("-s/--size 要写成 1280x720")
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        raise SystemExit("-s/--size 要写成 1280x720（数字）")
+
+
+def adb_of(wake=True):
+    """拿 adb 并确保电视在线；连不上就（可选）先唤醒电视再试一次。"""
+    adb = d.find_adb()
+    if not adb:
+        raise SystemExit("没找到 adb（设 $ADB 或装 platform-tools）")
+    for attempt in (1, 2):
+        subprocess.run([adb, "connect", d.TV_ADDR], timeout=15,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        state = subprocess.run([adb, "-s", d.TV_ADDR, "get-state"], stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True).stdout.strip()
+        if state == "device":
+            return adb
+        if attempt == 1 and wake:
+            print("adb 连不上 %s，先叫醒电视（tv-on.sh）…" % d.TV_ADDR, file=sys.stderr, flush=True)
+            d.wake_tv(TAG)
+    raise SystemExit("adb 还是连不上电视（%s）：电视没开机？先 tv-on.sh / tv-cast on" % d.TV_ADDR)
+
+
+def screencap(adb):
+    """抓一帧，返回 PNG 字节；失败返回 b''。"""
+    return subprocess.run([adb, "-s", d.TV_ADDR, "exec-out", "screencap", "-p"],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+
+
+def shot(args):
+    adb = adb_of()
+    path = os.path.expanduser(args.file) if args.file else os.path.join(
+        os.path.expanduser("~/Pictures"), "tv-%s.png" % time.strftime("%Y%m%d-%H%M%S"))
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    data = screencap(adb)
+    if len(data) < MIN_PNG:
+        raise SystemExit("截图失败（电视可能没醒/没连上）")
+    with open(path, "wb") as f:
+        f.write(data)
+    print("已保存 %s（%.0f KB）" % (path, len(data) / 1024))
+    d.note(TAG, "电视截图已保存", os.path.basename(path))
+    print("提示: 硬件解码的视频画面抓不到（全黑），截图对菜单/界面有效")
+    return 0
+
+
+def reap(*procs):
+    for p in procs:
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+
+
+def live_scrcpy(args):
+    scrcpy = shutil.which("scrcpy")
+    if not scrcpy:
+        raise SystemExit("没装 scrcpy：sudo pacman -S scrcpy（不装就用默认的截图流，约 1 帧/秒）")
+    adb_of()
+    cmd = [scrcpy, "-s", d.TV_ADDR, "--window-title=电视画面",
+           "--max-size=%d" % max(args.size), "--no-audio"]
+    if args.audio:
+        cmd.remove("--no-audio")
+    if args.full:
+        cmd.append("--fullscreen")
+    print("scrcpy 看电视中（鼠标键盘能直接操作电视），关窗口结束")
+    return subprocess.run(cmd).returncode
+
+
+def live_capture(args):
+    """本机循环 adb 截图 → ffplay 当图像流播（约 1 帧/秒，这台电视的 screenrecord 是坏的）。"""
+    ffplay = shutil.which("ffplay")
+    if not ffplay:
+        raise SystemExit("没装 ffplay（Arch 上在 ffmpeg 包里）：sudo pacman -S ffmpeg")
+    adb = adb_of()
+    w, h = args.size
+    cmd = [ffplay, "-loglevel", "error", "-nostats",
+           "-fflags", "nobuffer", "-flags", "low_delay",
+           # 关掉 probe/analyze：默认要先读 ~1MB 找流信息，1 帧/秒的流会卡好几秒
+           "-analyzeduration", "0", "-probesize", "32768",
+           # framerate 只用来定步长：调大（25）让预热帧和来帧都「立刻显示」而不是按 0.5 秒/张慢慢放
+           "-f", "image2pipe", "-framerate", "25", "-i", "-",
+           "-window_title", "电视画面"]
+    cmd += ["-fs"] if args.full else ["-x", str(w), "-y", str(h)]
+    print("看电视中（约 1 帧/秒：这台电视 screenrecord 是坏的，只能一帧帧截图刷；%s）…"
+          % "Ctrl-C 或关窗口结束")
+    print("想要流畅画面：装 scrcpy 后用 tv-view --scrcpy（视频层可能仍全黑），"
+          "或采集卡接电视输出（这台电视没有 HDMI 输出）", file=sys.stderr)
+    sys.stdout.flush()
+    p_view = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    deadline = time.time() + args.time if args.time else None
+    try:
+        first = screencap(adb)
+        if len(first) < MIN_PNG:                       # 电视睡了 / adb 断了
+            print("截图失败，退出（电视可能睡了，先 tv-on.sh）", file=sys.stderr)
+        else:
+            try:
+                for _ in range(WARMUP_FRAMES):         # 骗播放器建窗：要连收几帧才开窗
+                    p_view.stdin.write(first)
+                    p_view.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+        while p_view.poll() is None:                   # 关窗口 / 按 q、Esc → 播放器退出
+            if deadline and time.time() >= deadline:
+                break
+            data = screencap(adb)
+            if len(data) < MIN_PNG:
+                print("截图失败，退出（电视可能睡了，先 tv-on.sh）", file=sys.stderr)
+                break
+            try:
+                p_view.stdin.write(data)
+                p_view.stdin.flush()
+            except (BrokenPipeError, OSError):
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            p_view.stdin.close()
+        except OSError:
+            pass
+        reap(p_view)
+        try:
+            p_view.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p_view.kill()
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="在本机窗口看 TCL 电视的画面（adb 抓屏）")
+    ap.add_argument("cmd", nargs="?", default="live", choices=("live", "shot"),
+                    help="live=看实时画面（默认，约 1 帧/秒）/ shot=截一张图")
+    ap.add_argument("file", nargs="?", help="shot 的保存路径（默认 ~/Pictures/tv-<时间>.png）")
+    ap.add_argument("-s", "--size", default="1280x720", metavar="WxH",
+                    help="窗口大小（默认 1280x720）")
+    ap.add_argument("--full", action="store_true", help="全屏")
+    ap.add_argument("--time", type=int, default=0, metavar="秒",
+                    help="只看这么多秒就退出（默认 0 = 一直看）")
+    ap.add_argument("--audio", action="store_true", help="scrcpy 时连声音一起抓")
+    ap.add_argument("--addr", default="", help="电视 adb 地址（默认 192.168.144.188:5555）")
+    ap.add_argument("--scrcpy", action="store_true", help="用 scrcpy（要先装，能操作电视）")
+    ap.add_argument("--capture", action="store_true", help="强制用截图流（约 1 帧/秒）")
+    a = ap.parse_args()
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    if a.addr:
+        d.TV_ADDR = a.addr
+        d.TV_HOST = a.addr.rsplit(":", 1)[0]
+    a.size = parse_size(a.size)
+    if a.cmd == "shot":
+        return shot(a)
+    if a.scrcpy and not a.capture:
+        return live_scrcpy(a)
+    return live_capture(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
