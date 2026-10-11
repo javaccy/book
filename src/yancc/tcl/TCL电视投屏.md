@@ -100,6 +100,7 @@ adb -s 192.168.144.188:5555 shell pm install -r /data/local/tmp/moonlight.apk
 - **开投屏**：遥控器打开 Moonlight → 点 `yancc-arcolinux` → 自动开始串流桌面
 - **退出**：遥控器返回键
 - **调画质**：Moonlight 设置 → 视频分辨率/码率（默认 1080p；电视是 4K，5GHz WiFi 下可直接拉 4K HEVC）
+- **显示图片**（不投屏、不占本机屏幕）：`tv-show 图片或目录` —— 见下文「在电视上显示图片（DLNA 推图）」
 
 ### 一键脚本 `tv-cast`（推荐）
 
@@ -205,6 +206,52 @@ tv-cast off    # 只关
 副作用说明：串流期间笔记本自己的屏幕会上下留边（面板比 16:9 高），电视上是满的；串流一停笔记本立即恢复。
 
 备选方案（未采用）：Moonlight 设置里"将画面拉伸至全屏"也能去黑边，但画面横向拉伸 ~11% 变形；Hyprland headless 虚拟显示器方案可以把电视当独立扩展屏用，有需要再搞。
+
+## 在电视上显示图片（DLNA 推图，2026-10-11）
+
+**结论：可行，而且是"电视端零安装"的做法** —— 电视自带一个 DLNA 渲染器（`192.168.144.188:17002`，
+device 名 `TCL 98P11K-2F09(...)`，UPnP 栈是 Platinum/DLNA 1.5），把图片用 HTTP 推过去它就会全屏显示。
+脚本：**`tv-show`**（`~/apps/tv/tv-show`，python3），用法见 `scripts/README.md`。
+
+```bash
+tv-show 照片.jpg              # 单张，一直显示到 tv-show off
+tv-show ~/Pictures/壁纸/       # 目录 → 循环幻灯片（默认 15 秒一张）
+tv-show -i 30 a.jpg b.jpg     # 自定义间隔
+tv-show --no-loop a.jpg b.jpg # 只放一遍
+tv-show off                   # 停止，电视回桌面
+```
+
+**占屏方式**：图片是电视自己在放，**不镜像、不占用本机屏幕**，电脑该干嘛干嘛（这点和 Moonlight 串流不同）。
+
+### 为什么不用别的方式
+
+| 方式 | 结果 |
+|------|------|
+| **DLNA 推图（本方案）** ✅ | 电视自带渲染器，全屏无黑边，脚本 5 秒上屏 |
+| Google Cast（`catt` 等） | ❌ 电视没有 GMS：`pm list packages \| grep -i google` 是空的，没有 chromecast 接收器 |
+| TCL 相册 `com.tcl.ui_mediaCenter/.picture_business.PictureActivity` | ❌ `am start -a VIEW -d file:///… -t image/*` 确实能拉起（`cmd package resolve-activity` 指向它），但**画面全黑**：截屏全黑而电视桌面截屏正常，SurfaceView 的 buffer 只有 16x109 —— 它不吃裸 `file://` |
+| 装个第三方看图 App | 可以用，但没必要：电视端相册类 App 都得靠遥控器点，DLNA 这条不用装东西 |
+| Moonlight 串流一个全屏看图器 | 能用，但会把本机屏幕（和键鼠）一起投过去，看图不值得 |
+
+### 原理（4 步）
+
+1. 本机起一个临时 HTTP 服务（随机端口），给图片加上 DLNA 响应头：
+   `contentFeatures.dlna.org: DLNA.ORG_PN=JPEG_LRG;DLNA.ORG_OP=01;…`、`transferMode.dlna.org: Interactive`
+2. `SSDP M-SEARCH`（239.255.255.250:1900，ST=`urn:schemas-upnp-org:device:MediaRenderer:1`）拿到电视的 device 描述 URL
+3. 从描述里取 `AVTransport` 的 `controlURL`（就是 `http://…:17002/AVTransport/ffbff7be-…/control`）
+4. `SetAVTransportURI`（带 DIDL-Lite 元数据，`<upnp:class>object.item.imageItem.photo</upnp:class>`）+ `Play`
+
+电视端接管的是 `com.tcl.MultiScreenInteraction_TV/com.tcl.allcast.presentation.activity.PresentationActivity`。
+
+### 实测数据 / 踩坑
+
+- 电视 `ConnectionManager.GetProtocolInfo` 的 **Sink 里明确有 `image/jpeg`、`image/png`**（还带一大堆 `image/*`），所以 JPEG/PNG 都能推；3840x2160 的图全屏显示**没有黑边**（和串流不一样，不用切 16:9）
+- `SetAVTransportURI` 后电视会立刻 `GET` 那张图，`GetTransportInfo` 变 `PLAYING`；**单张推一次就够**，反复推只会让电视重拉（脚本对单张只推一次）
+- 电视会短暂浮一个小浮层（左上角文件名 + 底部"左旋/右旋"按钮），几秒后自动消失，不用管
+- `AVTransport Stop` 就能结束显示，电视回桌面（`mCurrentFocus` 变回 `com.tcl.cyberui/.MainActivity`）
+- 电视关着的时候，脚本先调 `tv-on.sh`（画报屏保发 `KEYCODE_WAKEUP`、整机待机走树莓派 HDMI-CEC）
+- **验证显示效果用 `adb exec-out screencap -p > x.png` 就行**，电视 UI（含这个 PresentationActivity）都能截到；只有前面说的 PictureActivity 是黑的
+- 电视待机时渲染器也跟着断电（SSDP 收不到），所以"远程开机 + 推图"是一条链：先 CEC 唤醒，再找渲染器
 
 ## TCL 电视的前台抢占规律（重要）
 

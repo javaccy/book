@@ -8,15 +8,16 @@
 | `tv-on.sh` | **只把电视弄亮**（不碰 Moonlight）。已亮→直接退出；画报屏保→`KEYCODE_WAKEUP`；整机待机→树莓派 HDMI-CEC 唤醒 |
 | `tv-off.sh` | **把电视关到待机**（等于遥控器电源键）。串流中会先正常断开 + 恢复本机分辨率；本来就关着则直接退出 |
 | `tv-mode.sh` | 串流期间把本机屏幕临时切成 16:9（避免电视两侧黑边），结束恢复首选模式 |
+| `tv-show` | **把图片推到电视上全屏显示**（一张 / 多张幻灯片）。走电视自带的 DLNA 渲染器（`com.tcl.MultiScreenInteraction_TV`），不装 App、不用遥控器 |
 
 ## 安装（两台机器同一份）
 
 ```bash
 mkdir -p ~/apps/tv ~/.local/bin
-cp tv-cast tv-on.sh tv-off.sh tv-mode.sh ~/apps/tv/
-chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh
-for s in tv-cast tv-on.sh tv-off.sh; do       # 让脚本能直接敲（笔记本的 ~/.local/bin
-  ln -sf ~/apps/tv/$s ~/.local/bin/$s         #  是写在 ~/.zshenv 的 PATH 里的）
+cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show ~/apps/tv/
+chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh ~/apps/tv/tv-show
+for s in tv-cast tv-on.sh tv-off.sh tv-show; do   # 让脚本能直接敲（笔记本的 ~/.local/bin
+  ln -sf ~/apps/tv/$s ~/.local/bin/$s             #  是写在 ~/.zshenv 的 PATH 里的）
 done
 ```
 
@@ -30,12 +31,20 @@ tv-on.sh           # 只把电视点亮（不投屏），想远程开机就用�
 tv-off.sh          # 把电视关到待机（串流中会先正常断流 + 恢复本机分辨率）
 tv-on.sh status    # 只看状态：Awake / Dreaming(屏保) / 离线，exit 0/1/2
 tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
+tv-show 图片或目录...  # 在电视上显示图片；多张=循环幻灯片（默认 15 秒一张）
+tv-show -i 30 图片...  # 幻灯片间隔 30 秒
+tv-show --no-loop 图片...  # 多张只放一遍，停在最后一张
+tv-show off           # 停止显示，电视回桌面
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
 `tv-off.sh` 空闲时 15 秒关机；串流中 18 秒（先断流、把分辨率从 1920x1080 恢复到 3440x1440，再关机）；电视已经关着则秒退。
 
-常用环境变量：`TCL_TV_ADDR`（默认 `192.168.144.188:5555`）、`TCL_PC_NAME`（默认 `$(hostname)`，
+`tv-show` 是 python3 脚本（其余都是 bash）：图片用本机一个临时 HTTP 服务（带 DLNA 头）+ SSDP
+找到电视的 MediaRenderer，`SetAVTransportURI` + `Play` 推过去。**不占用本机屏幕**（不是镜像），
+电视关着时会先调 `tv-on.sh` 走 CEC 唤醒。实测单张 4K 图 5 秒上屏，3 张 6 秒间隔的幻灯片轮转正常。
+
+常用环境变量：`TCL_SHOW_INTERVAL`（`tv-show` 默认间隔秒数，默认 15）、`TCL_TV_ADDR`（默认 `192.168.144.188:5555`）、`TCL_PC_NAME`（默认 `$(hostname)`，
 即 PcView 里要点的电脑卡片名）、`TCL_TV_MAC`（设了才会在 adb 掉线时补发 WOL）、`TCL_VIDEO_APPS`
 （会抢前台的电视自家 App，默认 `com.xiaodianshi.tv.yst com.tcl.qiyiguo`）、`ADB`（指定 adb 路径）。
 
