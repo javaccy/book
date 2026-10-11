@@ -5,7 +5,7 @@
 | 脚本 | 用途 |
 |------|------|
 | `tv-cast` | 一键开/关电视上的 Moonlight 串流。adb 驱动电视端自动点击（PcView → 电脑卡片 → AppView 回车 → 恢复串流回车），带前台校验和重试；桌面有 mako 通知 |
-| `tv-on.sh` | **只把电视弄亮**（不碰 Moonlight）。已亮→直接退出；画报屏保→`KEYCODE_WAKEUP`；整机待机→树莓派 HDMI-CEC 唤醒 |
+| `tv-on.sh` | **只把电视弄亮**（不碰 Moonlight）。已亮→直接退出；画报屏保→`KEYCODE_WAKEUP`；整机待机→树莓派 HDMI-CEC 唤醒；framework 挂死→报错并提示 `tv-on.sh recover`（`adb reboot` + 等 services 回到 >100） |
 | `tv-off.sh` | **把电视关到待机**（等于遥控器电源键）。串流中会先正常断开 + 恢复本机分辨率；adb 用不了（连不上 / shell 卡死）时自动走树莓派 CEC 待机兜底（这台电视认开机不认关机，兜底常失败） |
 | `tv-mode.sh` | 串流期间把本机屏幕临时切成 16:9（避免电视两侧黑边），结束恢复首选模式 |
 | `tv-show` | **把图片推到电视上全屏显示**（一张 / 多张幻灯片）。走电视自带的 DLNA 渲染器（`com.tcl.MultiScreenInteraction_TV`），不装 App、不用遥控器 |
@@ -38,7 +38,8 @@ tv-cast on         # 只在电视上开播（电视关着会自动 CEC 唤醒）
 tv-cast off        # 只在电视上退出（回电视桌面）
 tv-on.sh           # 只把电视点亮（不投屏），想远程开机就用它
 tv-off.sh          # 把电视关到待机（串流中会先正常断流 + 恢复本机分辨率）
-tv-on.sh status    # 只看状态：Awake / Dreaming(屏保) / 离线，exit 0/1/2
+tv-on.sh status    # 只看状态：Awake / Dreaming(屏保) / 离线 / framework 挂死，exit 0/1/2/3
+tv-on.sh recover   # 电视 framework 挂死时用（dumpsys 空、input/window 服务都没了）：adb reboot + 等恢复
 tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
 tv-show 图片或目录...  # 在电视上显示图片；多张=循环幻灯片（默认 15 秒一张）
 tv-show -i 30 图片...  # 幻灯片间隔 30 秒
@@ -75,7 +76,8 @@ tv-vol mute | unmute | toggle   # 静音 / 取消静音 / 切换
 tv-alsamixer           # 交互式调音量（键位照 alsamixer：↑↓ ±1 / PgUp·PgDn ±5 / Home·End / m 静音 / q 退出）
 ```
 
-`tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
+`tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒；
+第 4 种「framework 挂死」由 `service list` 数量（<100）判定，`tv-on.sh recover` 重启恢复实测 ~39 秒。
 `tv-off.sh` 空闲时约 5 秒关机；串流中会先断流、把分辨率从 1920x1080 恢复到 3440x1440 再关机；adb 用不了时改走 CEC 待机兜底。
 
 `tv-show` / `tv-play` 是 python3 脚本（其余都是 bash），共用 `tv_dlna.py`：本机起一个临时 HTTP 服务

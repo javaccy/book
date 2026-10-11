@@ -228,7 +228,13 @@ def wake_tv(tag):
                  os.path.join(TV_DIR, "tv-on.sh")):
         if os.path.isfile(cand):
             log(tag, "先唤醒电视: %s" % cand)
-            subprocess.run([cand], timeout=180, check=False)
+            rc = subprocess.run([cand], timeout=180, check=False).returncode
+            if rc == 3:
+                # tv-on.sh 的新状态码：电视 framework 挂了（service list 只剩几十项），
+                # 按键和 DLNA 都不响应，KEYCODE_WAKEUP 没用。
+                log(tag, "电视 framework 疑似挂死（tv-on.sh 返回 3）→ 先跑 tv-on.sh recover")
+            elif rc != 0:
+                log(tag, "tv-on.sh 返回 %s" % rc)
             return True
     log(tag, "找不到 tv-on.sh，跳过唤醒（电视关着就先手动开机）")
     return False
@@ -258,7 +264,7 @@ def discover(tag, svc="AVTransport", tries=20, wait=3.0, wake=True, fallback=Non
     if fallback:
         log(tag, "SSDP 没找到，沿用上次地址: %s" % fallback)
         return fallback
-    raise RuntimeError("没找到电视的 DLNA 渲染器（电视没开？）")
+    raise RuntimeError("没找到电视的 DLNA 渲染器（电视没开？framework 挂了跑 tv-on.sh recover）")
 
 
 # --------------------------------------------------------------------- SOAP

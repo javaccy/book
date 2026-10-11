@@ -541,6 +541,29 @@ tv-mirror --mode popup   # 换成浮动小窗；--mode full / --full 全屏
   唯一可靠的是**唤醒方向**（`IMAGE_VIEW_ON`，多次验证）。
   结论：framework 挂死时，远程能做的只剩「CEC 待机兜底试一下」→ 不行就按遥控器。
 
+### 第三次挂（2026-10-11 晚，这次 adb shell 还能用 → 顺手做成 `tv-on.sh recover`）
+
+现象是用户报的「**tv-play 不成功**」：
+
+- `tv-play 视频` 卡在日志里「先唤醒电视: tv-on.sh」之后就没了下文；手动 `discover()` 报
+  `没找到电视的 DLNA 渲染器（电视没开？）`。
+- `tv-on.sh status` 骗人地回 **`Dreaming（画报屏保）`** —— 其实 `dumpsys power` 根本吐不出东西。
+- 按本文的诊断法一查就现原形：`service list | wc -l` = **27**（正常 ~196），`load average` = **52**，
+  `service check input/window/activity/power` 全是 `not found`，`dumpsys power` 输出 0 行。
+- 按键（`KEYCODE_WAKEUP` / `BACK` / `HOME`）全都没反应 —— 因为 `input` 服务本身就没了。
+
+**跟前一次的关键差别：这次 `adb shell` 是好的**（能跑 `service list`、`cat /proc/loadavg`），
+所以 `adb reboot` 直接就能发进去。重启实测：发完 ~35 秒回到 `boot_completed=1`、`services=196`，
+`tv-play` 立刻恢复正常（`PLAYING 00:00:04 / 00:05:12`）。
+
+于是把它做成了脚本 `tv-on.sh recover`（`adb reboot` + 每 5 秒轮询 `boot_completed` 和
+`services > 100`，恢复正常后补一发 `KEYCODE_WAKEUP`）并跑通全流程；`tv_dlna.py` 的 `wake_tv()`
+也会识别 `tv-on.sh` 的 `exit 3`，在日志里直接写「先跑 tv-on.sh recover」。
+（前一次 `adb shell` 全卡死、`reboot` 发不进去，只能走 CEC standby+唤醒那条路 —— 两次情况不同。）
+
+诱因大概还是**连续重活**：当天先后跑了 67 张的 `tv-show` 幻灯片、scrcpy 镜像来回抓音抓屏、
+DLNA 推流、还装了 TiViMate。
+
 ### 其它
 
 - 电视在画报屏保/待机时也能抓（画面就是屏保内容）；电视整机待机（网络断了）时 `tv-view` 会提示先 `tv-on.sh`。
@@ -736,12 +759,18 @@ CEC_WAKE_CMD="${TCL_CEC_WAKE_CMD:-ssh -o BatchMode=yes -o ConnectTimeout=5 yancc
 ```bash
 tv-on.sh           # 开机/唤醒（已经亮着就直接退出）
 tv-off.sh          # 关到待机（串流中会先正常断流并恢复本机分辨率）
-tv-on.sh status    # 只看状态，不做操作（exit 0=Awake 1=屏保 2=离线）
+tv-on.sh status    # 只看状态，不做操作（exit 0=Awake 1=屏保 2=离线 3=framework 疑似挂死）
+tv-on.sh recover   # framework 挂死时的修法：adb reboot + 等到 services 回到 >100
 tv-off.sh status   # 同上（转调 tv-on.sh status）
 ```
 
 `tv-on.sh` 三种状态分别处理：已亮 → 什么都不做；画报屏保（`mWakefulness=Dreaming`，网络通）→ adb 发 `KEYCODE_WAKEUP`；
 整机待机（adb 完全连不上）→ 树莓派 HDMI-CEC。实测：0.3 秒 / 4 秒 / 11 秒。
+
+⚠️ 2026-10-11 补的第 4 种状态（`exit 3`）：**framework 挂死**。这时 `dumpsys power` 吐不出东西，
+老代码取不到 `mWakefulness` 就当成"屏保"，于是对一个已经挂了的电视反复发 `KEYCODE_WAKEUP`
+（`tv-on.log` 里能看到这种空转）。现在空值时会再用 `service list | wc -l` 确认一次
+（正常 ~196，挂死时只剩几十项），判成 3 就**不发按键**、直接提示跑 `tv-on.sh recover`。
 
 `tv-off.sh` 发 `KEYCODE_POWER` 进待机，发完等它 adb+ping 都不通才算成功（待机后 adb 的 `get-state` 会一直
 骗人，所以先看 ping 再 `adb disconnect` 清状态）。实测 4.6 秒（比之前的 15 秒快，因为不在这里反复
