@@ -249,7 +249,12 @@ tv-show off                   # 停止，电视回桌面
 - 电视 `ConnectionManager.GetProtocolInfo` 的 **Sink 里明确有 `image/jpeg`、`image/png`**（还带一大堆 `image/*`），所以 JPEG/PNG 都能推；3840x2160 的图全屏显示**没有黑边**（和串流不一样，不用切 16:9）
 - `SetAVTransportURI` 后电视会立刻 `GET` 那张图，`GetTransportInfo` 变 `PLAYING`；**单张推一次就够**，反复推只会让电视重拉（脚本对单张只推一次）
 - 电视会短暂浮一个小浮层（左上角文件名 + 底部"左旋/右旋"按钮），几秒后自动消失，不用管
-- `AVTransport Stop` 就能结束显示，电视回桌面（`mCurrentFocus` 变回 `com.tcl.cyberui/.MainActivity`）
+- `AVTransport Stop` 就能结束显示，电视回桌面（`mCurrentFocus` 变回 `com.tcl.cyberui/.MainActivity`）。
+  **停止只能在电脑这边发**（`tv-show off`，`stop` 同义）：电视端用遥控器按 HOME 退不掉
+  —— 实测按完 HOME，`mCurrentFocus` 还是 `com.tcl.MultiScreenInteraction_TV/...PresentationActivity`；
+  而且推图的守护进程还在跑，每 N 秒会把画面再抢回来（67 张的幻灯片尤其明显）。
+  另外 `--help` 之前只列参数、看不到 `off`/`stop` 这些子命令，2026-10-11 已把子命令写进
+  `tv-show` / `tv-text` / `tv-play` 的 epilog，并给 `off`/`stop` 互为别名。
 - 电视关着的时候，脚本先调 `tv-on.sh`（画报屏保发 `KEYCODE_WAKEUP`、整机待机走树莓派 HDMI-CEC）
 - **验证显示效果用 `adb exec-out screencap -p > x.png` 就行**，电视 UI（含这个 PresentationActivity）都能截到；只有前面说的 PictureActivity 是黑的
 - 电视待机时渲染器也跟着断电（SSDP 收不到），所以"远程开机 + 推图"是一条链：先 CEC 唤醒，再找渲染器

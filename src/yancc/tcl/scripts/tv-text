@@ -39,6 +39,12 @@ TV_SHOW = os.path.join(HERE, "tv-show")
 PIC_DIR = os.path.join(os.path.expanduser("~/Pictures"), "tv-text")
 KEEP_DAYS = 7
 
+EPILOG = """\
+子命令 / 常用法:
+  tv-text off          停止显示（转 tv-show off，stop 同义）
+  tv-text              不带文字 = 看这段用法
+"""
+
 NAMED = {"black": "#000000", "white": "#ffffff", "red": "#e02020", "green": "#28c828",
          "blue": "#3070e0", "yellow": "#f0c000", "orange": "#f08000", "gray": "#808080",
          "grey": "#808080", "dark": "#101010", "pink": "#f06aa0", "cyan": "#20c0c0"}
@@ -217,7 +223,9 @@ def cleanup():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="在 TCL 电视上全屏显示文字")
+    ap = argparse.ArgumentParser(
+        description="在 TCL 电视上全屏显示文字",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("text", nargs="*", help="要显示的文字；多个参数 = 多页幻灯片")
     ap.add_argument("-s", "--size", type=int, default=0, metavar="像素",
                     help="字号（默认 0 = 自动撑满画面）")
@@ -232,8 +240,9 @@ def main():
     a = ap.parse_args()
 
     if not a.text:
-        raise SystemExit('用法：tv-text "要显示的文字" ；停止显示用 tv-text off')
-    if a.text[0] == "off":
+        ap.print_help()
+        return 2
+    if a.text[0] in ("off", "stop"):
         return subprocess.run([TV_SHOW, "off"]).returncode
     a.screen = parse_size(a.screen)
     try:

@@ -43,18 +43,18 @@ tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
 tv-show 图片或目录...  # 在电视上显示图片；多张=循环幻灯片（默认 15 秒一张）
 tv-show -i 30 图片...  # 幻灯片间隔 30 秒
 tv-show --no-loop 图片...  # 多张只放一遍，停在最后一张
-tv-show off           # 停止显示，电视回桌面
+tv-show off           # 停止显示，电视回桌面（stop 同义；电视端按 HOME 退不掉，只能这边停）
 tv-text "外卖到了"      # 在电视上全屏显示文字（本地渲染 PNG → 走 tv-show 那条链路）
 tv-text -s 120 "会议中"            # 指定字号（不给就自动撑满，最多 320px）
 tv-text --fg '#ffc000' --bg '#101010'   # 字色/底色
 tv-text "第一页" "第二页"           # 多段 = 幻灯片（-i 20 改间隔，--no-loop 只放一遍）
-tv-text off           # 停止显示（转 tv-show off）
+tv-text off           # 停止显示（转 tv-show off，stop 同义）
 tv-play 视频或目录...   # 在电视上播视频；给多个文件/目录=连播，播完自动下一个
 tv-play pause|resume   # 暂停 / 继续（走 adb 遥控键，比 DMR 命令可靠）
 tv-play seek 12:30     # 拖到 12:30（也支持 +30 / -30 相对拖动）
 tv-play next           # 切下一个
 tv-play status         # 当前文件 + 状态 + 进度
-tv-play stop           # 停止，电视回桌面
+tv-play stop           # 停止，电视回桌面（off 同义）
 tv-play --sub auto 电影.mkv   # 把字幕烧进画面再播（默认不烧；auto=同名外挂优先，没有就用内嵌、中文优先）
 tv-play --sub 字幕.srt 电影.mp4  # 指定外挂字幕文件
 tv-play -t chi 电影.mkv        # 只烧这条内嵌字幕流（给 ffprobe 序号或语言；不看外挂字幕）

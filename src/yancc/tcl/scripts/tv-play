@@ -46,6 +46,19 @@ import tv_dlna as d                                    # noqa: E402
 
 TAG = "tv-play"
 SKIP = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "tv-play.skip")
+
+EPILOG = """\
+子命令:
+  tv-play pause | resume        暂停 / 继续
+  tv-play seek 12:30 | +30 | -30  拖到指定位置 / 相对拖动
+  tv-play next                  切到下一个
+  tv-play status                当前文件 + 状态 + 进度
+  tv-play stop                  停止播放，电视回桌面（off 同义）
+  tv-play                       不带参数 = 等同 status
+
+停止只能在这边发：电视端用遥控器按 HOME 退不掉（画面由
+com.tcl.MultiScreenInteraction_TV 的 PresentationActivity 接管）。
+"""
 REPLAY = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "tv-play.replay")
 VIDEO = {
     ".mp4": ("video/mp4", "AVC_MP4_HP_HD_AAC"), ".m4v": ("video/mp4", "AVC_MP4_HP_HD_AAC"),
@@ -750,8 +763,10 @@ def seek(target):
 
 def main():
     argv = sys.argv[1:]
-    if argv and argv[0] in ("pause", "resume", "play", "stop", "status", "next", "seek"):
+    if argv and argv[0] in ("pause", "resume", "play", "stop", "off", "status", "next", "seek"):
         cmd, rest = argv[0], argv[1:]
+        if cmd == "off":
+            cmd = "stop"
         if cmd == "pause":
             if paused_or_stopped("pause"):
                 return 1
@@ -778,7 +793,9 @@ def main():
                 raise SystemExit("用法: tv-play seek 12:30 | tv-play seek +30 | tv-play seek -30")
             return seek(rest[0])
 
-    ap = argparse.ArgumentParser(description="在 TCL 电视上播放本地视频（DLNA）")
+    ap = argparse.ArgumentParser(
+        description="在 TCL 电视上播放本地视频（DLNA）",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="*", help="视频文件或目录（可多个）")
     ap.add_argument("-f", "--from", dest="from_pos", default="",
                     help="从指定位置开始，如 12:30")

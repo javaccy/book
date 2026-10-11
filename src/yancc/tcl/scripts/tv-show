@@ -33,6 +33,16 @@ MIME = {
     ".bmp": ("image/bmp", ""), ".gif": ("image/gif", ""), ".webp": ("image/webp", ""),
 }
 
+EPILOG = """\
+子命令 / 常用法:
+  tv-show off                 停止显示，电视回桌面（stop 同义）
+  tv-show                     不带参数 = 看当前状态（在跑就打印 pid / 张数 / 端口）
+  tv-show on 图片...           加不加 on 一样（为了和 off 对称）
+
+停止只能在这边发：电视端用遥控器按 HOME 退不掉（DLNA 推的画面
+由 com.tcl.MultiScreenInteraction_TV 接管，推图的守护进程每 N 秒还会把画面抢回来）。
+"""
+
 
 def collect(paths):
     """展开目录；目录里的图按名字自然排序（tvimg-2 在 tvimg-10 前面）。"""
@@ -152,7 +162,9 @@ def stop(quiet=False):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="把图片推到 TCL 电视全屏显示")
+    ap = argparse.ArgumentParser(
+        description="把图片推到 TCL 电视全屏显示",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="*", help="图片文件或目录")
     ap.add_argument("-i", "--interval", type=float,
                     default=float(os.environ.get("TCL_SHOW_INTERVAL", 15)),
@@ -163,7 +175,7 @@ def main():
 
     if a.paths and a.paths[0] == "on":
         a.paths = a.paths[1:]
-    if a.paths and a.paths[0] == "off":
+    if a.paths and a.paths[0] in ("off", "stop"):
         return stop()
     if not a.paths:
         st = d.read_state(TAG)
