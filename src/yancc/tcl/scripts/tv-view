@@ -6,6 +6,8 @@
   tv-view                  开个窗口看（默认约 1 帧/秒，见下「为什么不是流畅视频」）
   tv-view --time 30        看 30 秒自己退出（默认一直看，关窗口/Ctrl-C 结束）
   tv-view --full           全屏
+  tv-view --mode normal    平铺窗口（跟别的窗口分屏）；--mode popup 浮动居中（默认）
+                           三种形态：popup（默认）/ normal（平铺）/ full（全屏），--full = --mode full
   tv-view -s 1280x720      窗口大小（默认 1280x720）
   tv-view shot [文件]      截一张图（默认 ~/Pictures/tv-<时间>.png）
   tv-view --scrcpy         用 scrcpy（要先装），界面流畅(11~30fps)能鼠标键盘直接操作电视
@@ -77,6 +79,13 @@ import tv_dlna as d                                    # noqa: E402
 TAG = "tv-view"
 MIN_PNG = 1000                                         # 小于这个字节数当截图失败
 WARMUP_FRAMES = 8                                      # 见文件头「实现坑」：播放器要连收几帧才建窗
+# screencap 失败（电视没醒没连上）与「在放受保护片源被 SurfaceFlinger 拒绝」是两回事，提示里都写上
+CAP_FAIL = ("截图失败（电视没醒/没连上，先 tv-on.sh；"
+            "或者正在放受保护(DRM)片源——SurfaceFlinger 会以 `FB is protected: PERMISSION_DENIED` "
+            "拒绝 screencap，这种只能用 --scrcpy 看）")
+# 窗口形态 → 窗口标题。只有 popup 用「电视画面」：Hyprland 里那条 float-tv-view 规则是按
+# title=^电视画面$ 匹配的（浮动+居中），其它形态换个不匹配的标题 → 交给平铺布局 / 播放器自己全屏。
+TITLES = {"popup": "电视画面", "normal": "电视画面（平铺）", "full": "电视画面（全屏）"}
 
 
 def parse_size(text):
@@ -122,7 +131,7 @@ def shot(args):
         os.makedirs(folder, exist_ok=True)
     data = screencap(adb)
     if len(data) < MIN_PNG:
-        raise SystemExit("截图失败（电视可能没醒/没连上）")
+        raise SystemExit(CAP_FAIL)
     with open(path, "wb") as f:
         f.write(data)
     print("已保存 %s（%.0f KB）" % (path, len(data) / 1024))
@@ -146,7 +155,7 @@ def live_scrcpy(args):
     if not scrcpy:
         raise SystemExit("没装 scrcpy：sudo pacman -S scrcpy（不装就用默认的截图流，约 1 帧/秒）")
     adb_of()
-    cmd = [scrcpy, "-s", d.TV_ADDR, "--window-title=电视画面",
+    cmd = [scrcpy, "-s", d.TV_ADDR, "--window-title=%s" % TITLES[args.mode],
            "--max-size=%d" % max(args.size), "--no-audio"]
     if args.audio:
         cmd.remove("--no-audio")
@@ -156,7 +165,7 @@ def live_scrcpy(args):
         # 默认的 playback 源在这台电视上读回 0 字节（Could not read audio: 0），
         # output（转发整个音频输出）实测能采到 → 见文件头「scrcpy 音频」
         cmd.append("--audio-source=%s" % args.audio_source)
-    if args.full:
+    if args.mode == "full":
         cmd.append("--fullscreen")
     print("scrcpy 看电视中（鼠标键盘能直接操作电视），关窗口结束")
     try:
@@ -183,8 +192,8 @@ def live_capture(args):
            "-analyzeduration", "0", "-probesize", "32768",
            # framerate 只用来定步长：调大（25）让预热帧和来帧都「立刻显示」而不是按 0.5 秒/张慢慢放
            "-f", "image2pipe", "-framerate", "25", "-i", "-",
-           "-window_title", "电视画面"]
-    cmd += ["-fs"] if args.full else ["-x", str(w), "-y", str(h)]
+           "-window_title", TITLES[args.mode]]
+    cmd += ["-fs"] if args.mode == "full" else ["-x", str(w), "-y", str(h)]
     print("看电视中（约 1 帧/秒：这台电视 screenrecord 是坏的，只能一帧帧截图刷；%s）…"
           % "Ctrl-C 或关窗口结束")
     if shutil.which("scrcpy"):
@@ -199,7 +208,7 @@ def live_capture(args):
     try:
         first = screencap(adb)
         if len(first) < MIN_PNG:                       # 电视睡了 / adb 断了
-            print("截图失败，退出（电视可能睡了，先 tv-on.sh）", file=sys.stderr)
+            print(CAP_FAIL, file=sys.stderr)
         else:
             try:
                 for _ in range(WARMUP_FRAMES):         # 骗播放器建窗：要连收几帧才开窗
@@ -212,7 +221,7 @@ def live_capture(args):
                 break
             data = screencap(adb)
             if len(data) < MIN_PNG:
-                print("截图失败，退出（电视可能睡了，先 tv-on.sh）", file=sys.stderr)
+                print(CAP_FAIL, file=sys.stderr)
                 break
             try:
                 p_view.stdin.write(data)
@@ -241,7 +250,9 @@ def main():
     ap.add_argument("file", nargs="?", help="shot 的保存路径（默认 ~/Pictures/tv-<时间>.png）")
     ap.add_argument("-s", "--size", default="1280x720", metavar="WxH",
                     help="窗口大小（默认 1280x720）")
-    ap.add_argument("--full", action="store_true", help="全屏")
+    ap.add_argument("--mode", choices=("popup", "normal", "full"), default=None,
+                    help="窗口形态：popup=浮动居中（默认）/ normal=平铺 / full=全屏")
+    ap.add_argument("--full", action="store_true", help="全屏（等于 --mode full）")
     ap.add_argument("--time", type=int, default=0, metavar="秒",
                     help="只看这么多秒就退出（默认 0 = 一直看）")
     ap.add_argument("--audio", action="store_true", help="scrcpy 时连声音一起抓")
@@ -258,6 +269,7 @@ def main():
         d.TV_ADDR = a.addr
         d.TV_HOST = a.addr.rsplit(":", 1)[0]
     a.size = parse_size(a.size)
+    a.mode = a.mode or ("full" if a.full else "popup")
     if a.cmd == "shot":
         return shot(a)
     if a.scrcpy and not a.capture:

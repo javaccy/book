@@ -371,6 +371,12 @@ tv-view --scrcpy           # 用 scrcpy（要先装）：界面 11~30 帧/秒，
   遥控器/菜单却正常；320x240 的小片子能抓到。所以这套只能看界面，看不了正在播的片子本身。
 - **帧率跟着画面复杂度走**：JSON 的 250 KB → ~1 帧/秒；画报屏保那种花屏（PNG 1.7 MB）→ **0.4 帧/秒**，
   而且电视端编码就吃掉 2.5 秒。所以查看器大约滞后画面 1~4 秒，属正常。
+- **放受保护（DRM）片源时 `screencap` 会被拒**（2026-10-11 实测）：电视在播某短视频/直播 app 时
+  `screencap -p` 直接 `rc=1` + 0 字节，logcat 里是
+  `W SurfaceFlinger: FB is protected: PERMISSION_DENIED` + `E SurfaceFlinger: captureScreen failed to readInt32: -1`。
+  （不是电视睡着了；`dumpsys power` 还是 `Awake`/`Display state=ON`。）**同一时刻 scrcpy 照常能抓**
+  （它走 SurfaceControl，1 MB/4 秒的录像里画面是正常内容），所以碰到这种情况就用 `--scrcpy`。
+  `tv-view` 的 live/shot 失败提示里已经写上这条了。
 
 ### 实现踩坑（都在脚本里绕过了）
 
@@ -391,7 +397,24 @@ tv-view --scrcpy           # 用 scrcpy（要先装）：界面 11~30 帧/秒，
    })
    ```
 
-   不想要浮动窗口的话删掉这条，或者直接用 `--full`。
+   注意这条**只匹配标题正好是 `电视画面` 的窗口**，也就是 `--mode popup`（默认）。
+
+### 窗口形态：`--mode popup|normal|full`（2026-10-11 实测）
+
+三种形态靠**窗口标题**切换：只有 popup 的标题是 `电视画面`（命中上面那条浮动规则，实际配置里
+class 已经把 scrcpy 也加进去了：`^(mpv|ffplay|scrcpy)$`），另外两种换成不匹配的标题
+（`电视画面（平铺）` / `电视画面（全屏）`），于是走平铺布局 / 播放器自己的全屏：
+
+```bash
+tv-view --scrcpy                 # popup（默认）：浮动+居中，-s 决定大小 ✅ 实测 floating=True, 1280x720
+tv-view --scrcpy --mode normal   # 平铺：占满工作区，能和别的窗口分屏 ✅ 实测 floating=False, 1872x1392
+tv-view --scrcpy --mode full     # 真全屏（scrcpy --fullscreen / ffplay -fs）✅ 实测 fullscreen=2, 3440x1440
+tv-view --scrcpy --full          # --full 是 --mode full 的老写法，保留
+```
+
+- `--mode normal` / `full` 下 `-s/--size` 不再起作用（大小交给窗口管理器/全屏），属正常。
+- 想换默认形态：改脚本里 `--mode` 的默认值，或自己包一层 alias。
+- 三种形态实测都走同一份 scrcpy 命令，只有标题和 `--fullscreen` 不同，画面/操作不受影响。
 
 ### scrcpy（`--scrcpy`，想要流畅/想操作电视就用它）
 
