@@ -61,13 +61,19 @@ tv-mode.sh on|off  # 只切/恢复显示器模式（一般不用手动跑）
 
 细节、实测数据和排查见文档「HDMI-CEC 远程开机（已实现）」一节。
 
-想绑快捷键的话，`hyprland.lua` 里可以加：
+**故意不在 `hyprland.lua` 里绑快捷键**（2026-10-11 定）：电视功能不常用，
+命令行 `tv-cast` / `tv-on.sh` / `tv-off.sh` 足够，不必占用键位。
+（注：这些 F 键本来也被 cava / kitty 下拉 / 钉钉占用，别再照抄下面的老建议。）
+
+<details><summary>历史建议（已作废，仅存档）</summary>
 
 ```lua
-Bind("SUPER + F12", "exec tv-cast")      # 开/关投屏
-Bind("SUPER + F11", "exec tv-on.sh")     # 只开电视
-Bind("SUPER + F10", "exec tv-off.sh")    # 只关电视
+Bind("SUPER + F12", "exec tv-cast")      # 已被占用，勿用
+Bind("SUPER + F11", "exec tv-on.sh")     # 已被占用，勿用
+Bind("SUPER + F10", "exec tv-off.sh")    # 已被占用，勿用
 ```
+
+</details>
 
 踩坑提醒：
 

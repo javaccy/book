@@ -1,0 +1,17 @@
+#!/bin/sh
+# dmenu_run 的 Wayland 替代版（用 rofi -dmenu）
+# -matching fuzzy: 模糊匹配  -i: 大小写不敏感  -sort: 按相关性排序
+#
+# 2026-10-11：选中的命令行不再直接灌给 $SHELL。
+# 旧写法 `dmenu_path | rofi ... | ${SHELL:-/bin/sh} &` 启动的应用是 Hyprland 的
+# 直接子进程，堆在 compositor 自己的 cgroup（session.slice/wayland-wm@hyprland.desktop.service）里，
+# systemctl --user 看不到、也没法单独管理。现在交给 `uwsm app`：应用落到独立的
+# systemd scope（app-graphical.slice/app-*.scope）；uwsm app 是 exec 语义，不会多留包装进程。
+sel=$(dmenu_path | rofi -dmenu -matching fuzzy -i -sort -p "Run") || exit 0
+[ -n "$sel" ] || exit 0
+
+shell_="${SHELL:-/bin/sh}"
+if command -v uwsm >/dev/null 2>&1; then
+    exec uwsm app -- "$shell_" -c "$sel"
+fi
+exec setsid -f "$shell_" -c "$sel"   # 没装 uwsm 时退回旧行为，只多一层 setsid 脱离

@@ -115,11 +115,7 @@ tv-cast off    # 只关
 
 源码收在本仓库 **`src/yancc/tcl/scripts/`**（`tv-cast` + `tv-mode.sh` + `README.md`，两台机器同一份），部署就是 `cp tv-cast tv-mode.sh ~/apps/tv/ && chmod +x ~/apps/tv/tv-{cast,mode.sh}`。
 
-绑 Hyprland 快捷键，在 `hyprland.lua` 里加一行：
-
-```lua
-Bind("SUPER + F12", "exec tv-cast")
-```
+**不绑 Hyprland 快捷键**（2026-10-11 定）：电视功能不常用，直接用命令 `tv-cast` 等即可。
 
 注意：
 
