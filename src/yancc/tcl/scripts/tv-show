@@ -4,87 +4,43 @@
 
 用法:
   tv-show 图片或目录...        显示（多张 = 循环幻灯片，默认每张 15 秒）
-  tv-show on 图片或目录...     同上
   tv-show -i 30 图片...        幻灯片间隔改成 30 秒
   tv-show --no-loop 图片...    多张只放一遍，放完停在最后一张
   tv-show -F 图片...           前台运行（调试用，Ctrl-C 结束）
   tv-show off                  停止显示，电视回桌面
 
-原理: 本机起一个只读 HTTP 服务（带 DLNA 头），SSDP 找到电视的 MediaRenderer，
-再用 AVTransport SetAVTransportURI + Play 把图片推过去；电视端由
-com.tcl.MultiScreenInteraction_TV 的 PresentationActivity 全屏显示。
-实测电视的 Sink 里带 image/jpeg、image/png，3040x2160 的图直接全屏不裁切。
+原理、实测数据和踩坑见 ../TCL电视投屏.md「在电视上显示图片（DLNA 推图）」，
+公共部分（SSDP 发现 / SOAP / 带 Range 的 DLNA HTTP 服务）在同目录 tv_dlna.py。
 
 环境变量: TCL_TV_ADDR / TCL_SHOW_INTERVAL / TCL_CEC_WAKE_CMD / TCL_TV_DIR
-参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
 """
 
 import argparse
-import http.server
-import json
 import os
-import re
-import signal
-import socket
-import socketserver
-import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
-import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
-from xml.sax.saxutils import escape as xesc
 
-TV = os.environ.get("TCL_TV_ADDR", "192.168.144.188:5555")
-TV_HOST = TV.rsplit(":", 1)[0] if ":" in TV else TV
-TV_DIR = os.environ.get("TCL_TV_DIR", os.path.expanduser("~/apps/tv"))
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
-STATE = os.path.join(RUNTIME, "tv-show.state")
-LOG = os.path.join(TV_DIR, "tv-show.log")
-SSDP = ("239.255.255.250", 1900)
-RENDERER_ST = "urn:schemas-upnp-org:device:MediaRenderer:1"
-AVT_TYPE = "urn:schemas-upnp-org:service:AVTransport:1"
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import tv_dlna as d                                    # noqa: E402
 
-# 图片扩展名 → (MIME, DLNA profile)。profile 只影响电视端的解码档位，
-# 给不准也能放，宁可用 *_LRG（<=4096x4096，电视是 4K 就够）。
+TAG = "tv-show"
+# 图片扩展名 → (MIME, DLNA profile)。profile 只影响电视端解码档位，给不准也能放，
+# 宁可用 *_LRG（<=4096x4096，电视 4K 够用）。
 MIME = {
     ".jpg": ("image/jpeg", "JPEG_LRG"), ".jpeg": ("image/jpeg", "JPEG_LRG"),
     ".jfif": ("image/jpeg", "JPEG_LRG"), ".png": ("image/png", "PNG_LRG"),
-    ".bmp": ("image/bmp", ""), ".gif": ("image/gif", ""),
-    ".webp": ("image/webp", ""),
+    ".bmp": ("image/bmp", ""), ".gif": ("image/gif", ""), ".webp": ("image/webp", ""),
 }
 
 
-def log(msg):
-    line = "%s %s\n" % (time.strftime("%F %T"), msg)
-    try:
-        os.makedirs(TV_DIR, exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(line)
-    except OSError:
-        pass
-    sys.stderr.write(line)
-    sys.stderr.flush()
-
-
-def note(title, body=""):
-    try:
-        subprocess.Popen(["notify-send", "-a", "tv-show", title, body],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        pass
-
-
-# ---------------------------------------------------------------- 文件收集
 def collect(paths):
-    """展开目录，返回 [(绝对路径, mime, profile)]；目录里的图按名字自然排序。"""
+    """展开目录；目录里的图按名字自然排序（tvimg-2 在 tvimg-10 前面）。"""
     out = []
     for p in paths:
         p = os.path.abspath(os.path.expanduser(p))
         if os.path.isdir(p):
+            import re
             names = sorted((n for n in os.listdir(p)
                             if os.path.splitext(n)[1].lower() in MIME),
                            key=lambda n: [int(t) if t.isdigit() else t.lower()
@@ -96,344 +52,107 @@ def collect(paths):
         elif os.path.isfile(p):
             ext = os.path.splitext(p)[1].lower()
             if ext not in MIME:
-                log("跳过（不是图片）: %s" % p)
+                d.log(TAG, "跳过（不是图片）: %s" % p)
                 continue
             out.append((p,) + MIME[ext])
         else:
-            log("跳过（不存在）: %s" % p)
+            d.log(TAG, "跳过（不存在）: %s" % p)
     return out
 
 
-# ------------------------------------------------------------ 电视端唤醒
-def renderer_alive(timeout=2.0):
+def worker(files, interval, loop):
+    d.write_state(TAG, {**d.read_state(TAG), "pid": os.getpid(), "state": "STARTING"})
+    d.kill_daemon("tv-play")                           # 和视频模式共用渲染器，先让 tv-play 退场
+    ctrl = d.discover(TAG, tries=20, wait=3.0)
+    served = {"/i/%d%s" % (i, os.path.splitext(p)[1].lower()):
+              {"file": p, "mime": m, "features": d.features(pr), "transfer": "Interactive"}
+              for i, (p, m, pr) in enumerate(files)}
+    srv = d.Server(served, TAG)
+    d.write_state(TAG, {**d.read_state(TAG), "pid": os.getpid(), "avt": ctrl,
+                        "port": srv.port, "files": len(files), "state": "SHOWING"})
     try:
-        return bool(ssdp_renderer(timeout))
-    except OSError:
-        return False
-
-
-def wake_tv():
-    """复用 tv-on.sh：已亮秒退、画报屏保发 KEYCODE_WAKEUP、整机待机走树莓派 CEC。"""
-    for cand in (os.path.join(SCRIPT_DIR, "tv-on.sh"),
-                 os.path.expanduser("~/.local/bin/tv-on.sh"),
-                 os.path.join(TV_DIR, "tv-on.sh")):
-        if os.path.isfile(cand):
-            log("唤醒电视: %s" % cand)
-            subprocess.run([cand], timeout=180, check=False)
-            return
-    log("找不到 tv-on.sh，跳过唤醒（电视关着的话请先手动开机）")
-
-
-# ------------------------------------------------------------------ SSDP / SOAP
-def ssdp_renderer(timeout=3.0):
-    """返回 [(ip, location)]；只认 MediaRenderer。"""
-    msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
-           'MAN: "ssdp:discover"\r\nMX: 2\r\nST: %s\r\n\r\n' % RENDERER_ST).encode()
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-    s.settimeout(timeout)
-    try:
-        for _ in range(2):
-            s.sendto(msg, SSDP)
-        found, deadline = [], time.time() + timeout
-        while time.time() < deadline:
-            try:
-                data, addr = s.recvfrom(65535)
-            except socket.timeout:
-                break
-            head = {}
-            for line in data.decode(errors="replace").splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    head[k.strip().lower()] = v.strip()
-            if RENDERER_ST in head.get("st", "") and head.get("location"):
-                found.append((addr[0], head["location"]))
-        return found
-    finally:
-        s.close()
-
-
-def avt_control(location):
-    with urllib.request.urlopen(location, timeout=5) as r:
-        root = ET.fromstring(r.read())
-    for svc in root.iter("{urn:schemas-upnp-org:device-1-0}service"):
-        t = svc.findtext("{urn:schemas-upnp-org:device-1-0}serviceType") or ""
-        c = svc.findtext("{urn:schemas-upnp-org:device-1-0}controlURL") or ""
-        if t.startswith(AVT_TYPE) and c:
-            return urljoin(location, c)
-    raise RuntimeError("渲染器没有 AVTransport 服务: %s" % location)
-
-
-def discover_avt(tries=10, wait=3.0):
-    """找到电视的 AVTransport 控制地址；电视刚开机时服务起得慢，多试几轮。"""
-    cached = read_state().get("avt")
-    for i in range(tries):
-        try:
-            for ip, loc in ssdp_renderer():
-                if ip != TV_HOST:
-                    continue
-                ctrl = avt_control(loc)
-                log("找到 DLNA 渲染器 %s -> %s" % (ip, ctrl))
-                return ctrl
-        except (OSError, ET.ParseError, RuntimeError) as e:
-            log("第 %d 轮发现失败: %s" % (i + 1, e))
-        if i == 0 and not renderer_alive(1.0):
-            wake_tv()
-        time.sleep(wait)
-    if cached:
-        log("SSDP 没找到，沿用上次的 AVTransport: %s" % cached)
-        return cached
-    raise RuntimeError("没找到电视的 DLNA 渲染器（电视没开？）")
-
-
-def soap(ctrl, action, args, urn=AVT_TYPE):
-    body = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
-            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
-            '<u:%s xmlns:u="%s">' % (action, urn))
-    for k, v in args.items():
-        body += "<%s>%s</%s>" % (k, xesc(str(v)), k)
-    body += "</u:%s></s:Body></s:Envelope>" % action
-    req = urllib.request.Request(ctrl, data=body.encode(),
-                                 headers={"Content-Type": 'text/xml; charset="utf-8"',
-                                          "SOAPACTION": '"%s#%s"' % (urn, action)})
-    with urllib.request.urlopen(req, timeout=8) as r:
-        return r.status, r.read().decode(errors="replace")
-
-
-def push(ctrl, url, mime, profile, title):
-    feats = "DLNA.ORG_PN=%s;DLNA.ORG_OP=01" % profile if profile else "*"
-    didl = ('<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
-            'xmlns:dc="http://purl.org/dc/elements/1.1/" '
-            'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
-            '<item id="1" parentID="0" restricted="1">'
-            "<dc:title>%s</dc:title>"
-            "<upnp:class>object.item.imageItem.photo</upnp:class>"
-            '<res protocolInfo="http-get:*:%s:%s">%s</res>'
-            "</item></DIDL-Lite>" % (xesc(title), mime, feats, xesc(url)))
-    soap(ctrl, "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": url,
-                                     "CurrentURIMetaData": didl})
-    soap(ctrl, "Play", {"InstanceID": 0, "Speed": 1})
-
-
-# ------------------------------------------------------------------ HTTP 服务
-SERVED = {}
-
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def _meta(self):
-        item = SERVED.get(self.path)
-        if not item:
-            return None
-        path, mime, profile = item
-        return path, mime, profile
-
-    def _headers(self, size, mime, profile):
-        self.send_response(200)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(size))
-        feats = ("DLNA.ORG_PN=%s;DLNA.ORG_OP=01;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
-                 % profile) if profile else \
-                "DLNA.ORG_OP=01;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
-        self.send_header("contentFeatures.dlna.org", feats)
-        self.send_header("transferMode.dlna.org", "Interactive")
-        self.end_headers()
-
-    def do_GET(self):
-        item = self._meta()
-        if not item:
-            self.send_error(404)
-            return
-        path, mime, profile = item
-        with open(path, "rb") as f:
-            data = f.read()
-        self._headers(len(data), mime, profile)
-        try:
-            self.wfile.write(data)
-        except BrokenPipeError:
-            pass
-
-    def do_HEAD(self):
-        item = self._meta()
-        if not item:
-            self.send_error(404)
-            return
-        path, mime, profile = item
-        self._headers(os.path.getsize(path), mime, profile)
-
-    def log_message(self, fmt, *a):
-        log("HTTP " + fmt % a)
-
-
-def slideshow(ctrl, base, files, interval, loop, stop):
-    def one(i):
-        path, mime, profile = files[i]
-        url = "%s/i/%d%s" % (base, i, os.path.splitext(path)[1].lower())
-        try:
-            push(ctrl, url, mime, profile, os.path.basename(path))
-            log("已推送 [%d/%d] %s" % (i + 1, len(files), path))
-        except (urllib.error.URLError, OSError) as e:
-            log("推送失败: %s" % e)
-
-    if len(files) == 1:
-        one(0)                        # 单张推一次就够，反复 SetAVTransportURI 只会让电视重拉
-        log("单张模式，保持显示（tv-show off 结束）")
-        stop.wait()
-        return
-
-    i = 0
-    while not stop.is_set():
-        one(i)
-        i += 1
-        if i >= len(files):
-            if not loop:
-                log("幻灯片放完（--no-loop），停在第 %d 张" % len(files))
-                return
-            i = 0
-        stop.wait(interval)
-
-
-# ---------------------------------------------------------------------- 主流程
-def read_state():
-    try:
-        with open(STATE, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def write_state(d):
-    tmp = STATE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(d, f)
-    os.replace(tmp, STATE)
-
-
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, TypeError):
-        return False
-
-
-def worker(files, interval, loop, sock, port, ctrl):
-    """守护进程主体：起 HTTP 服务 + 定时推图。"""
-    os.setsid()
-    devnull = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(devnull, fd)          # log() 自己写文件，别再让 stdio 也写进去
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-
-    for i, (path, mime, profile) in enumerate(files):
-        SERVED["/i/%d%s" % (i, os.path.splitext(path)[1].lower())] = (path, mime, profile)
-
-    srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler, bind_and_activate=False)
-    srv.socket = sock
-    srv.server_address = ("0.0.0.0", port)
-    srv.server_activate()
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-
-    stop = threading.Event()
-    try:
-        slideshow(ctrl, "http://%s:%d" % (local_ip(), port), files, interval, loop, stop)
-        stop.wait()          # --no-loop 放完也别退：HTTP 服务要留着，电视可能重新拉图
+        for i, (path, mime, profile) in enumerate(files):
+            url = srv.url("/i/%d%s" % (i, os.path.splitext(path)[1].lower()))
+            d.push(ctrl, url, mime, profile, os.path.basename(path),
+                   upnp_class="object.item.imageItem.photo", transfer="Interactive")
+            d.log(TAG, "已推送 [%d/%d] %s" % (i + 1, len(files), path))
+            if i + 1 < len(files) or (loop and len(files) > 1):
+                time.sleep(interval)
+        if len(files) == 1:
+            d.log(TAG, "单张模式，保持显示（tv-show off 结束）")
+        elif loop:
+            while True:                                # 循环：整轮放完再从第一张开始
+                for i, (path, mime, profile) in enumerate(files):
+                    url = srv.url("/i/%d%s" % (i, os.path.splitext(path)[1].lower()))
+                    d.push(ctrl, url, mime, profile, os.path.basename(path),
+                           upnp_class="object.item.imageItem.photo", transfer="Interactive")
+                    d.log(TAG, "已推送 [%d/%d] %s" % (i + 1, len(files), path))
+                    time.sleep(interval)
+        else:
+            d.log(TAG, "幻灯片放完（--no-loop），停在最后一张")
+        threading.Event().wait()                        # HTTP 服务留着，电视可能重新拉图
     except KeyboardInterrupt:
         pass
     finally:
         srv.shutdown()
-
-
-def local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect((TV_HOST, 9))
-        return s.getsockname()[0]
-    finally:
-        s.close()
+        d.clear_state(TAG, os.getpid())
 
 
 def start(args):
-    if pid_alive(read_state().get("pid")):
-        log("已有 tv-show 在跑，先停掉旧的")
-        stop(sys.modules[__name__], quiet=True)
-
+    if d.pid_alive(d.read_state(TAG).get("pid")):
+        d.log(TAG, "已有 tv-show 在跑，先停掉旧的")
+        stop(quiet=True)
     files = collect(args.paths)
     if not files:
         print("没有可显示的图片（支持 %s）" % ", ".join(sorted(MIME)), file=sys.stderr)
         return 1
-    log("待显示 %d 张图，间隔 %.1fs，循环=%s" % (len(files), args.interval, not args.no_loop))
-
-    if not renderer_alive(1.5):
-        wake_tv()
-    ctrl = discover_avt(tries=20, wait=3.0)   # 冷启动时电视要 40~100 秒才起得来
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", 0))
-    sock.listen(8)
-    port = sock.getsockname()[1]
-
+    d.log(TAG, "待显示 %d 张图，间隔 %.1fs，循环=%s" % (len(files), args.interval, not args.no_loop))
     if args.foreground:
-        write_state({"pid": os.getpid(), "port": port, "avt": ctrl,
-                     "files": len(files)})
-        print("前台运行（Ctrl-C 结束）: http://%s:%d/  共 %d 张"
-              % (local_ip(), port, len(files)))
-        worker(files, args.interval, not args.no_loop, sock, port, ctrl)
-        os.unlink(STATE) if os.path.exists(STATE) else None
+        print("前台运行（Ctrl-C 结束）")
+        worker(files, args.interval, not args.no_loop)
+        os.path.exists(d.state_path(TAG)) and os.unlink(d.state_path(TAG))
         return 0
-
-    pid = os.fork()
+    pid = d.daemonize(TAG)
     if pid == 0:
-        worker(files, args.interval, not args.no_loop, sock, port, ctrl)
-        os._exit(0)
-    sock.close()
-    write_state({"pid": pid, "port": port, "avt": ctrl, "files": len(files),
-                 "interval": args.interval, "loop": not args.no_loop})
+        try:
+            worker(files, args.interval, not args.no_loop)
+        finally:
+            os._exit(0)
+    st = d.wait_ready(TAG, pid, "avt", timeout=60)
+    if not st.get("avt"):
+        print("没能在电视上开始显示，看看 %s/tv-show.log" % d.TV_DIR, file=sys.stderr)
+        return 1
     if len(files) == 1:
         print("已在电视上显示 1 张图片（保持显示），停止: tv-show off")
     else:
         print("已在电视上显示 %d 张图片（每张 %.0f 秒%s），停止: tv-show off"
               % (len(files), args.interval, "" if not args.no_loop else "，只放一遍"))
-    note("电视显示图片", "%d 张，%s 结束" % (len(files), "tv-show off"))
+    d.note(TAG, "电视显示图片", "%d 张" % len(files))
     return 0
 
 
-def stop(_mod=None, quiet=False):
-    st = read_state()
-    pid = st.get("pid")
+def stop(quiet=False):
+    st = d.read_state(TAG)
     ctrl = st.get("avt")
     try:
         if not ctrl:
-            ctrl = discover_avt(tries=2, wait=1.0)
-        soap(ctrl, "Stop", {"InstanceID": 0})
-        log("已发 AVTransport Stop")
-        time.sleep(1.5)                         # 给电视一点时间，别在它回拉图片时把服务关掉
-    except Exception as e:                      # noqa: BLE001 - 电视关了就别报错
-        log("发 Stop 失败（电视可能已经关了）: %s" % e)
-    if pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-        for _ in range(20):
-            if not pid_alive(pid):
-                break
-            time.sleep(0.1)
-        if pid_alive(pid):
-            os.kill(pid, signal.SIGKILL)
-    if os.path.exists(STATE):
-        os.unlink(STATE)
+            ctrl = d.discover(TAG, tries=2, wait=1.0, wake=False)
+        d.soap(ctrl, "Stop", {"InstanceID": 0})
+        d.log(TAG, "已发 AVTransport Stop")
+        time.sleep(1.5)                                 # 给电视一点时间，别在它回拉图片时把服务关掉
+    except Exception as e:                              # noqa: BLE001 - 电视关了就别报错
+        d.log(TAG, "发 Stop 失败（电视可能已经关了）: %s" % e)
+    d.kill_daemon(TAG)
+    if os.path.exists(d.state_path(TAG)):
+        os.unlink(d.state_path(TAG))
     if not quiet:
         print("已停止显示")
-        note("电视显示图片", "已停止")
+        d.note(TAG, "电视显示图片", "已停止")
     return 0
 
 
 def main():
-    ap = argparse.ArgumentParser(add_help=True, description="把图片推到 TCL 电视全屏显示")
+    ap = argparse.ArgumentParser(description="把图片推到 TCL 电视全屏显示")
     ap.add_argument("paths", nargs="*", help="图片文件或目录")
     ap.add_argument("-i", "--interval", type=float,
                     default=float(os.environ.get("TCL_SHOW_INTERVAL", 15)),
@@ -446,16 +165,16 @@ def main():
         a.paths = a.paths[1:]
     if a.paths and a.paths[0] == "off":
         return stop()
-
     if not a.paths:
-        try:
-            print("正在运行的 tv-show: pid=%s，共 %s 张图，http://%s:%s/"
-                  % (read_state().get("pid", "-"), read_state().get("files", "-"),
-                     local_ip(), read_state().get("port", "-")))
-        except OSError:
-            pass
+        st = d.read_state(TAG)
+        if st and not d.pid_alive(st.get("pid")):
+            d.clear_state(TAG)                          # 进程已经没了，清掉过期状态
+            st = {}
+        if st:
+            print("tv-show 在跑：pid=%s，%s 张图，http://%s:%s/"
+                  % (st.get("pid"), st.get("files"), d.local_ip(), st.get("port")))
         print("用法: tv-show 图片或目录... | tv-show off")
-        return 0 if read_state() else 2
+        return 0 if st else 2
     return start(a)
 
 

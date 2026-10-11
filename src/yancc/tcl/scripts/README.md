@@ -9,15 +9,18 @@
 | `tv-off.sh` | **把电视关到待机**（等于遥控器电源键）。串流中会先正常断开 + 恢复本机分辨率；本来就关着则直接退出 |
 | `tv-mode.sh` | 串流期间把本机屏幕临时切成 16:9（避免电视两侧黑边），结束恢复首选模式 |
 | `tv-show` | **把图片推到电视上全屏显示**（一张 / 多张幻灯片）。走电视自带的 DLNA 渲染器（`com.tcl.MultiScreenInteraction_TV`），不装 App、不用遥控器 |
+| `tv-play` | **在电视上播放本地视频**（电视自己解码，不镜像）。同一套 DLNA 渲染器 + HTTP `Range`，支持暂停/拖动/连播 |
+| `tv_dlna.py` | `tv-show` / `tv-play` 共用的库（SSDP 发现、SOAP、DLNA HTTP 服务），不用手动跑 |
 
 ## 安装（两台机器同一份）
 
 ```bash
 mkdir -p ~/apps/tv ~/.local/bin
-cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show ~/apps/tv/
-chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh ~/apps/tv/tv-show
-for s in tv-cast tv-on.sh tv-off.sh tv-show; do   # 让脚本能直接敲（笔记本的 ~/.local/bin
-  ln -sf ~/apps/tv/$s ~/.local/bin/$s             #  是写在 ~/.zshenv 的 PATH 里的）
+cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show tv-play tv_dlna.py ~/apps/tv/
+chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh \
+         ~/apps/tv/tv-show ~/apps/tv/tv-play
+for s in tv-cast tv-on.sh tv-off.sh tv-show tv-play; do   # 让脚本能直接敲（笔记本的 ~/.local/bin
+  ln -sf ~/apps/tv/$s ~/.local/bin/$s                     #  是写在 ~/.zshenv 的 PATH 里的）
 done
 ```
 
@@ -35,14 +38,23 @@ tv-show 图片或目录...  # 在电视上显示图片；多张=循环幻灯片�
 tv-show -i 30 图片...  # 幻灯片间隔 30 秒
 tv-show --no-loop 图片...  # 多张只放一遍，停在最后一张
 tv-show off           # 停止显示，电视回桌面
+tv-play 视频或目录...   # 在电视上播视频；给多个文件/目录=连播，播完自动下一个
+tv-play pause|resume   # 暂停 / 继续（走 adb 遥控键，比 DMR 命令可靠）
+tv-play seek 12:30     # 拖到 12:30（也支持 +30 / -30 相对拖动）
+tv-play next           # 切下一个
+tv-play status         # 当前文件 + 状态 + 进度
+tv-play stop           # 停止，电视回桌面
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
 `tv-off.sh` 空闲时 15 秒关机；串流中 18 秒（先断流、把分辨率从 1920x1080 恢复到 3440x1440，再关机）；电视已经关着则秒退。
 
-`tv-show` 是 python3 脚本（其余都是 bash）：图片用本机一个临时 HTTP 服务（带 DLNA 头）+ SSDP
-找到电视的 MediaRenderer，`SetAVTransportURI` + `Play` 推过去。**不占用本机屏幕**（不是镜像），
-电视关着时会先调 `tv-on.sh` 走 CEC 唤醒。实测单张 4K 图 5 秒上屏，3 张 6 秒间隔的幻灯片轮转正常。
+`tv-show` / `tv-play` 是 python3 脚本（其余都是 bash），共用 `tv_dlna.py`：本机起一个临时 HTTP 服务
+（带 DLNA 头，视频还支持 `Range`）+ SSDP 找到电视的 MediaRenderer，`SetAVTransportURI` + `Play` 推过去。
+**不占用本机屏幕**（不是镜像），电视关着时会先调 `tv-on.sh` 走 CEC 唤醒。实测单张 4K 图 5 秒上屏、
+3 张幻灯片轮转正常；视频 5 秒起播，暂停/拖动/连播都通，两个脚本会互相抢渲染器（后启动的赢）。
+
+`tv-show` 和 `tv-play` 不能同时用（共用同一个渲染器）：谁后启动谁的守护进程会先把对方的杀掉。
 
 常用环境变量：`TCL_SHOW_INTERVAL`（`tv-show` 默认间隔秒数，默认 15）、`TCL_TV_ADDR`（默认 `192.168.144.188:5555`）、`TCL_PC_NAME`（默认 `$(hostname)`，
 即 PcView 里要点的电脑卡片名）、`TCL_TV_MAC`（设了才会在 adb 掉线时补发 WOL）、`TCL_VIDEO_APPS`

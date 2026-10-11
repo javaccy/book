@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""在 TCL 电视上播放本地视频（电视自己解码，不镜像、不占本机屏幕）。
+
+用法:
+  tv-play 视频文件...          播放（给多个文件/目录 = 按顺序连播，播完自动下一个）
+  tv-play -f 12:30 视频...     从 12:30 开始播
+  tv-play pause|resume         暂停 / 继续
+  tv-play seek 12:30 | 90      拖动到指定位置（也支持 -30 / +30 相对拖动）
+  tv-play next                 切到下一个（下一个文件/目录里的下一个）
+  tv-play status               当前状态 + 进度
+  tv-play stop                 停止播放，电视回桌面
+
+原理: 本机起 HTTP 服务（支持 Range，拖动必须），SSDP 找到电视的 MediaRenderer，
+AVTransport SetAVTransportURI + Play。电视端由
+com.tcl.MultiScreenInteraction_TV 的 PresentationActivity 播放。
+
+两个实测出来的电视端限制（所以才有这个脚本的守护进程）:
+  * GetCurrentTransportActions 返回空、SetNextAVTransportURI 直接 401 → 电视没有"下一集"，
+    连播是我们每 2 秒轮询播放状态、播完再推下一个文件实现的
+  * RenderingControl.SetVolume 返回 200 但音量不变 → 音量只能电视遥控器调
+
+字幕: DLNA 这条链路没有字幕通道，外挂 .srt/.ass 电视端看不到（mkv 内嵌字幕看播放器心情）。
+参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
+"""
+
+import argparse
+import os
+import re
+import sys
+import threading
+import time
+import urllib.error
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import tv_dlna as d                                    # noqa: E402
+
+TAG = "tv-play"
+SKIP = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "tv-play.skip")
+REPLAY = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "tv-play.replay")
+VIDEO = {
+    ".mp4": ("video/mp4", "AVC_MP4_HP_HD_AAC"), ".m4v": ("video/mp4", "AVC_MP4_HP_HD_AAC"),
+    ".mkv": ("video/x-matroska", ""), ".webm": ("video/webm", ""),
+    ".avi": ("video/x-msvideo", ""), ".mov": ("video/quicktime", ""),
+    ".ts": ("video/mp2t", ""), ".m2ts": ("video/mp2t", ""),
+    ".flv": ("video/x-flv", ""), ".wmv": ("video/x-ms-wmv", ""),
+    ".rmvb": ("video/vnd.rn-realmedia-vbr", ""), ".mpg": ("video/mpeg", ""),
+    ".mpeg": ("video/mpeg", ""), ".3gp": ("video/3gpp", ""),
+}
+
+
+def collect(paths):
+    out = []
+    for p in paths:
+        p = os.path.abspath(os.path.expanduser(p))
+        if os.path.isdir(p):
+            names = sorted((n for n in os.listdir(p)
+                            if os.path.splitext(n)[1].lower() in VIDEO),
+                           key=lambda n: [int(t) if t.isdigit() else t.lower()
+                                          for t in re.split(r"(\d+)", n)])
+            for n in names:
+                f = os.path.join(p, n)
+                if os.path.isfile(f):
+                    out.append((f,) + VIDEO[os.path.splitext(f)[1].lower()])
+        elif os.path.isfile(p):
+            ext = os.path.splitext(p)[1].lower()
+            if ext not in VIDEO:
+                d.log(TAG, "跳过（不是认识的视频）: %s" % p)
+                continue
+            out.append((p,) + VIDEO[ext])
+        else:
+            d.log(TAG, "跳过（不存在）: %s" % p)
+    return out
+
+
+def ctrl_url(wake=False):
+    """拿 AVTransport 地址：缓存优先。wake=False 时（暂停/拖动这类控制命令）不折腾电视开机。"""
+    cached = d.read_state(TAG).get("avt")
+    if cached and d.transport_state(cached) != "OFFLINE":   # 端口每次重启都会变，缓存要探活
+        return cached
+    return d.discover(TAG, tries=20 if wake else 3, wait=3.0 if wake else 1.0, wake=wake)
+
+
+def media_key(code, expect, tries=4):
+    """遥控键优先的暂停/继续：发键后轮询传输状态确认，成功返回 True。"""
+    if not d.media_key(code, TAG):
+        return False
+    for _ in range(tries):
+        time.sleep(1.0)
+        if d.transport_state(ctrl_url()) == expect:
+            return True
+    return False
+
+
+def send(action, args=None, tries=6, gap=3.0, ready=None):
+    """发控制命令。
+
+    这是 DMR 兜底通道：电视的 Pause/Play 时灵时不灵（402 Invalid Args / 701 Transition not
+    available），所以暂停/继续优先走 adb 遥控键（media_key），Seek 只有这条通道（实测一直好使）。
+    这里以 3 秒间隔重试，第一次被拒时提示用户一声。
+    """
+    ctrl = ctrl_url()
+    if ready:
+        for _ in range(12):
+            if d.transport_state(ctrl) in ready:
+                break
+            time.sleep(1.0)
+    err = None
+    for i in range(tries):
+        try:
+            return d.soap(ctrl, action, args)[0]
+        except urllib.error.HTTPError as e:
+            err = e
+            detail = d.fault_text(e)
+            d.log(TAG, "%s 被拒（%s），当前 %s" % (action, detail, d.transport_state(ctrl)))
+            if i == 0:
+                print("电视刚开播时会拒 %s（%s），等它缓冲好，最多重试 60 秒…"
+                      % (action, detail), file=sys.stderr, flush=True)
+            time.sleep(gap)
+        except Exception as e:                          # noqa: BLE001
+            raise SystemExit("控制电视失败（电视关了？）: %s" % e)
+    raise SystemExit("电视拒绝 %s：%s（这个片源/这个时机电视就是不认，试试遥控器）"
+                     % (action, d.fault_text(err)))
+
+
+# ------------------------------------------------------------------ 后台播放
+def play_url(idx, files, srv, ctrl, from_pos=0):
+    path, mime, profile = files[idx]
+    ext = os.path.splitext(path)[1].lower()
+    url = srv.url("/v/%d%s" % (idx, ext))
+    d.push(ctrl, url, mime, profile, os.path.basename(path),
+           upnp_class="object.item.videoItem", transfer="Streaming")
+    d.log(TAG, "开播 [%d/%d] %s" % (idx + 1, len(files), path))
+    if from_pos:
+        time.sleep(2.0)                                 # 等电视真的开始播再 Seek，早了会被丢掉
+        d.soap(ctrl, "Seek", {"InstanceID": 0, "Unit": "REL_TIME",
+                              "Target": d.fmt_time(from_pos)})
+    d.write_state(TAG, {**d.read_state(TAG), "index": idx, "playing": path,
+                        "files": len(files), "port": srv.port})
+
+
+def worker(files, from_pos):
+    d.write_state(TAG, {**d.read_state(TAG), "pid": os.getpid(), "state": "STARTING"})
+    d.kill_daemon("tv-show")                            # 图片和视频抢同一个渲染器，先从图片模式退出来
+    ctrl = d.discover(TAG, tries=20, wait=3.0)
+    served = {}
+    for i, (path, mime, profile) in enumerate(files):
+        served["/v/%d%s" % (i, os.path.splitext(path)[1].lower())] = {
+            "file": path, "mime": mime, "features": d.features(profile), "transfer": "Streaming"}
+    srv = d.Server(served, TAG)
+    d.write_state(TAG, {**d.read_state(TAG), "pid": os.getpid(), "avt": ctrl,
+                        "port": srv.port, "files": len(files), "index": 0,
+                        "state": "PLAYING"})
+    play_url(0, files, srv, ctrl, from_pos)
+
+    idx, stopped_reads = 0, 0
+    try:
+        while True:
+            time.sleep(2.0)
+            if os.path.exists(REPLAY):                  # tv-play resume 发现已经播完 → 重推当前文件
+                os.unlink(REPLAY)
+                play_url(idx, files, srv, ctrl)
+                continue
+            if os.path.exists(SKIP):
+                # tv-play next：不让电视的 DMR 切（会被拒），由守护进程直接推下一个文件。
+                # 用哨兵文件而不是 state 字段 —— 两边都在写 state，会互相覆盖。
+                os.unlink(SKIP)
+                idx = min(idx + 1, len(files) - 1)
+                play_url(idx, files, srv, ctrl)
+                continue
+            state = d.transport_state(ctrl)
+            if state == "OFFLINE":
+                d.log(TAG, "渲染器失联，退出")
+                break
+            if state in ("STOPPED", "NO_MEDIA_PRESENT"):
+                stopped_reads += 1
+            else:
+                stopped_reads = 0
+                rel, _ = d.position(ctrl)
+                d.write_state(TAG, {**d.read_state(TAG), "state": state, "rel": rel})
+            if stopped_reads >= 2:                      # 连续两次才算真播完，避开开播瞬间的 STOPPED
+                stopped_reads = 0
+                idx += 1
+                if idx >= len(files):
+                    d.log(TAG, "播放列表结束（%d 个文件）" % len(files))
+                    d.write_state(TAG, {**d.read_state(TAG), "state": "FINISHED", "rel": ""})
+                    break
+                play_url(idx, files, srv, ctrl)
+    finally:
+        srv.shutdown()
+        d.clear_state(TAG, os.getpid())                 # 别留过期的 state 骗下一个命令
+        if os.path.exists(SKIP):
+            os.unlink(SKIP)
+
+
+def start(args):
+    if d.pid_alive(d.read_state(TAG).get("pid")):
+        d.log(TAG, "先停掉正在跑的 tv-play")
+        stop(args, quiet=True)
+    files = collect(args.paths)
+    if not files:
+        print("没有可播放的视频（支持 %s）" % " ".join(sorted(VIDEO)), file=sys.stderr)
+        return 1
+    d.log(TAG, "待播放 %d 个文件%s" % (len(files),
+                                       "，从 %s 开始" % d.fmt_time(args.from_pos) if args.from_pos else ""))
+    if args.foreground:
+        print("前台运行（Ctrl-C 结束）")
+        worker(files, args.from_pos)
+        return 0
+    pid = d.daemonize(TAG)
+    if pid == 0:
+        try:
+            worker(files, args.from_pos)
+        finally:
+            os._exit(0)
+    st = d.wait_ready(TAG, pid, "playing", timeout=120)
+    if not st.get("playing"):
+        print("没能开播（state=%s），看看 %s/tv-play.log" % (st.get("state", "?"), d.TV_DIR),
+              file=sys.stderr)
+        return 1
+    print("已开播：%s%s" % (os.path.basename(files[0][0]),
+                            "（共 %d 个，播完自动下一个）" % len(files) if len(files) > 1 else ""))
+    d.note(TAG, "电视开始播放", os.path.basename(files[0][0]))
+    return 0
+
+
+# ------------------------------------------------------------------ 控制命令
+def stop(args=None, quiet=False):
+    st = d.read_state(TAG)
+    ctrl = st.get("avt")
+    if ctrl:
+        try:
+            pos = d.position(ctrl)[0]
+            d.soap(ctrl, "Stop", {"InstanceID": 0})
+            d.log(TAG, "已停止（停在 %s）" % pos)
+            time.sleep(1.0)                             # 别在电视回拉数据时把 HTTP 服务关掉
+        except Exception as e:                          # noqa: BLE001
+            d.log(TAG, "发 Stop 失败（电视可能已经关了）: %s" % e)
+    d.kill_daemon(TAG)
+    if ctrl and d.transport_state(ctrl) in ("PLAYING", "PAUSED_PLAYBACK", "TRANSITIONING"):
+        # DMR Stop 在"开播初期"会被拒，那就照遥控器的做法按一下返回键退出播放器
+        d.media_key(4, TAG)
+    path = d.state_path(TAG)
+    if os.path.exists(path):
+        os.unlink(path)
+    if not quiet:
+        print("已停止播放")
+    return 0
+
+
+def status():
+    st = d.read_state(TAG)
+    ctrl = st.get("avt")
+    if not ctrl:
+        print("tv-play 没在跑（tv-play 视频文件… 开始）")
+        return 2
+    state = d.transport_state(ctrl)
+    rel, dur = d.position(ctrl)
+    playing = st.get("playing", "-")
+    idx = st.get("index")
+    total = st.get("files")
+    where = " [%s/%s]" % (idx + 1, total) if isinstance(idx, int) and total else ""
+    print("%s%s  %s  %s / %s" % (os.path.basename(str(playing)), where, state, rel, dur))
+    return 0
+
+
+def paused_or_stopped(action):
+    """命令发之前先看状态：已经停了就别再发（发也是等 60 秒然后报错）。"""
+    state = d.transport_state(ctrl_url())
+    if action == "pause" and state not in ("PLAYING", "TRANSITIONING"):
+        print("电视现在是 %s，不用暂停" % state, file=sys.stderr)
+        return True
+    if action == "resume" and state in ("STOPPED", "NO_MEDIA_PRESENT"):
+        print("电视上的播放已经停了（要重播就再来一次 tv-play 视频文件…）", file=sys.stderr)
+        return True
+    return False
+
+
+def resume():
+    """继续播放。电视端状态不同处理不一样，别一根筋地发 Play（发多了就是等 60 秒然后报错）。"""
+    ctrl = ctrl_url()
+    state = d.transport_state(ctrl)
+    if state == "PLAYING":
+        print("已经在播了")
+        return 0
+    if state in ("STOPPED", "NO_MEDIA_PRESENT"):
+        if not d.read_state(TAG).get("pid"):
+            print("电视上的播放已经停了（要重播就再来一次 tv-play 视频文件…）", file=sys.stderr)
+            return 1
+        open(REPLAY, "w").close()                       # 播完了 → 让守护进程重新推这个文件
+        print("这个文件已经停了，已让守护进程重头开始")
+        return 0
+    if media_key(126, "PLAYING"):
+        print("继续播放")
+        return 0
+    return simple("Play", ready=("PAUSED_PLAYBACK", "TRANSITIONING", "STOPPED"))
+
+
+def simple(action, args=None, ready=None):
+    send(action, args, ready=ready)
+    print({"Pause": "已暂停", "Play": "继续播放", "Stop": "已停止",
+           "Next": "已切下一个"}.get(action, action))
+    return 0
+
+
+def seek(target):
+    ctrl = ctrl_url()
+    rel, _ = d.position(ctrl)
+    ready = ("PLAYING", "PAUSED_PLAYBACK", "TRANSITIONING")
+    if target.startswith(("+", "-")):
+        now = d.parse_time(rel) if rel else 0
+        delta = d.parse_time(target[1:])
+        target = d.fmt_time(max(0, now + (-delta if target[0] == "-" else delta)))
+    else:
+        target = d.fmt_time(d.parse_time(target))
+    send("Seek", {"InstanceID": 0, "Unit": "REL_TIME", "Target": target}, ready=ready)
+    print("已拖到 %s" % target)
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("pause", "resume", "play", "stop", "status", "next", "seek"):
+        cmd, rest = argv[0], argv[1:]
+        if cmd == "pause":
+            if paused_or_stopped("pause"):
+                return 1
+            # 127 = KEYCODE_MEDIA_PAUSE；遥控键最可靠，DMR 只在 adb 不可用时兜底
+            if media_key(127, "PAUSED_PLAYBACK"):
+                print("已暂停")
+                return 0
+            return simple("Pause", ready=("PLAYING", "PAUSED_PLAYBACK", "TRANSITIONING"))
+        if cmd in ("resume", "play"):
+            return resume()
+        if cmd == "stop":
+            return stop()
+        if cmd == "status":
+            return status()
+        if cmd == "next":
+            st = d.read_state(TAG)
+            if not st.get("avt"):
+                raise SystemExit("tv-play 没在跑")
+            open(SKIP, "w").close()                     # 守护进程下一轮（≤2 秒）就会推下一个
+            print("已通知切下一个")
+            return 0
+        if cmd == "seek":
+            if not rest:
+                raise SystemExit("用法: tv-play seek 12:30 | tv-play seek +30 | tv-play seek -30")
+            return seek(rest[0])
+
+    ap = argparse.ArgumentParser(description="在 TCL 电视上播放本地视频（DLNA）")
+    ap.add_argument("paths", nargs="*", help="视频文件或目录（可多个）")
+    ap.add_argument("-f", "--from", dest="from_pos", default="",
+                    help="从指定位置开始，如 12:30")
+    ap.add_argument("-F", "--foreground", action="store_true", help="前台运行（调试）")
+    a = ap.parse_args()
+    a.from_pos = d.parse_time(a.from_pos) if a.from_pos else 0
+    if (a.paths[:1] or [""])[0] == "on":
+        a.paths = a.paths[1:]
+    if not a.paths:
+        return status()
+    return start(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

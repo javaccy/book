@@ -101,6 +101,7 @@ adb -s 192.168.144.188:5555 shell pm install -r /data/local/tmp/moonlight.apk
 - **退出**：遥控器返回键
 - **调画质**：Moonlight 设置 → 视频分辨率/码率（默认 1080p；电视是 4K，5GHz WiFi 下可直接拉 4K HEVC）
 - **显示图片**（不投屏、不占本机屏幕）：`tv-show 图片或目录` —— 见下文「在电视上显示图片（DLNA 推图）」
+- **播放视频**（不投屏、不占本机屏幕）：`tv-play 视频或目录` —— 见下文「在电视上播放视频（DLNA 推流）」
 
 ### 一键脚本 `tv-cast`（推荐）
 
@@ -252,6 +253,70 @@ tv-show off                   # 停止，电视回桌面
 - 电视关着的时候，脚本先调 `tv-on.sh`（画报屏保发 `KEYCODE_WAKEUP`、整机待机走树莓派 HDMI-CEC）
 - **验证显示效果用 `adb exec-out screencap -p > x.png` 就行**，电视 UI（含这个 PresentationActivity）都能截到；只有前面说的 PictureActivity 是黑的
 - 电视待机时渲染器也跟着断电（SSDP 收不到），所以"远程开机 + 推图"是一条链：先 CEC 唤醒，再找渲染器
+
+## 在电视上播放视频（DLNA 推流，2026-10-11）
+
+**结论：可行**，和图片走同一个电视自带 DLNA 渲染器，差别只是 HTTP 服务要支持 `Range`（拖动/续传要用），
+`transferMode.dlna.org` 用 `Streaming`、DIDL 的 class 用 `object.item.videoItem`。
+脚本：**`tv-play`**（python3，和 `tv-show` 共用 `tv_dlna.py`）。
+
+```bash
+tv-play 电影.mp4              # 播放
+tv-play ~/剧集/第1季/          # 目录 → 按名字顺序连播，播完自动下一个
+tv-play -f 12:30 电影.mkv     # 从 12:30 开始
+tv-play pause | resume        # 暂停 / 继续
+tv-play seek 1:20 | seek +30 | seek -30
+tv-play next | status | stop
+```
+
+**占屏方式**：电视自己解码播放，**不镜像、不占本机屏幕**（和 Moonlight 串流完全不同）。
+看完 `tv-play stop` 回桌面；不给参数时打印当前文件/状态/进度。
+
+### 实测数据
+
+| 片子 | 结果 |
+|------|------|
+| intro.mp4（AVC 1600x900 + AAC，5:12） | ✅ 5 秒起播，暂停/继续/拖动到 4:00 都正常 |
+| 5-media-query.mp4（AVC + AAC，6:27） | ✅ 正常播放，拖动到 1:35 正常 |
+| Katy Perry…avi（MPEG-4 Visual + MP3，4:22） | ✅ 老 AVI 也能播、能拖 |
+| gst 自制的 H.264 短片（mp4/mkv，10~65 秒） | ✅ 播放正常，连播时 mp4→mkv 自动衔接 |
+
+电视 `GetProtocolInfo` 的 Sink 里 video 一栏几乎是全家桶（mp4/mkv/avi/rmvb/ts/flv/wmv/mpeg…），
+所以**大部分片子不用转码**；真要转码得用 ffmpeg（这台机器的 ffmpeg 目前被 libass/fontconfig 的
+符号问题搞坏了：`undefined symbol: FcConfigSetDefaultSubstitute`，要先修系统包）。
+
+### 电视端的脾气（都实测过，脚本里绕开了）
+
+1. **没有"下一集"**：`SetNextAVTransportURI` 直接 401 Invalid Action，`GetCurrentTransportActions`
+   返回空。所以连播是**本机守护进程**每 2 秒轮询传输状态、播完再 `SetAVTransportURI` 推下一个文件；
+   `tv-play next` 也走同一机制（写个哨兵文件 `$XDG_RUNTIME_DIR/tv-play.skip`，守护进程下一轮就切）。
+2. **DMR 的 `Pause`/`Play` 时灵时不灵**：会被甩 `402 Invalid Args` / `701 Transition not available`，
+   开播后几十秒内几乎必拒，之后也可能拒（intro.mp4 同一请求：位置 0:10 时连拒 20 次，位置 1:35 时一次就过）。
+   **但 adb 发遥控媒体键 100% 可靠**：`input keyevent 127`（暂停）→ 状态立刻变 `PAUSED_PLAYBACK`，
+   `126`（播放）→ 变 `PLAYING`，`85` 是播放/暂停切换。所以 `tv-play pause|resume` 优先走 keyevent，
+   DMR 只在 adb 不可用时兜底。`stop` 也会在 DMR Stop 失败后补一发 `KEYCODE_BACK`（等效遥控器返回键）。
+3. **`Seek`（DMR）一直好使**（实测拖到 1:00 / 1:35 / 3:20 / 4:00 都对），但**快进快退键没用**：
+   `KEYCODE_MEDIA_FAST_FORWARD(90)`、`REWIND(89)`、`DPAD_RIGHT/LEFT` 在电视端播放器里都不改进度
+   （只涨了自然流逝的那几秒），所以拖动只走 DMR Seek。
+4. **音量控制不了**：`RenderingControl.SetVolume` 返回 200 但 `GetVolume` 还是原值，只能用遥控器。
+5. **视频层截屏是黑的**：图片那条能 `adb exec-out screencap` 截到画面，视频走硬件叠加层，截出来全黑。
+   所以验证播放靠 `GetTransportInfo` / `GetPositionInfo`（状态 + 进度在走）+ HTTP 日志里的 `206` 请求。
+6. **画报屏保能被推流顶掉**：前台会从 `com.tcl.appreciate.art/DreamActivity` 变成
+   `com.tcl.MultiScreenInteraction_TV/…PresentationActivity`，不用先按遥控器。
+7. **DLNA 端口每次重启都变**（`17002` → `16606`），所以控制地址必须每次 SSDP 现场发现，
+   缓存的地址要先探活再用。
+8. 电脑上会有个守护进程（HTTP 服务 + 轮询），`tv-play stop` 会连状态文件一起清掉；
+   **`tv-show` 和 `tv-play` 不能同时用**（同一个渲染器），后启动的会把先启动的守护进程杀掉。
+
+### 字幕
+
+DLNA 这条链路**没有字幕通道**：外挂 `.srt/.ass` 电视端看不到。mkv 内嵌字幕能不能显示取决于电视
+播放器（没测）。要硬字幕就得重编码烧进去（等 ffmpeg 修好再说）。
+
+### 另一条路（没走，备查）
+
+跑个 DLNA MediaServer（minidlna 之类）让电视自己在"多屏互动/媒体中心"里浏览播放 —— 适合整个片库，
+但遥控器选片不如命令行直接，也没实测。
 
 ## TCL 电视的前台抢占规律（重要）
 
