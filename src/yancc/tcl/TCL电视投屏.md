@@ -351,7 +351,7 @@ tv-view --time 30          # 看 30 秒自动退出
 tv-view --full             # 全屏
 tv-view -s 1280x720        # 窗口大小（需要下面的 Hyprland 规则配合）
 tv-view shot [文件]        # 只截一张图（默认 ~/Pictures/tv-<时间>.png）
-tv-view --scrcpy           # 用 scrcpy（要先装，能鼠标键盘直接操作电视）
+tv-view --scrcpy           # 用 scrcpy（要先装）：界面 11~30 帧/秒，还能鼠标键盘直接操作电视
 ```
 
 原理：`adb exec-out screencap -p` 一帧帧抓，塞进 `ffplay` 当图像流播（`-f image2pipe`）。
@@ -364,7 +364,7 @@ tv-view --scrcpy           # 用 scrcpy（要先装，能鼠标键盘直接操�
 | `screenrecord` | ❌ **这台电视上是坏的**：录 4 秒还是 20 秒、输出到 stdout 还是电视本地文件、屏幕亮着还是待机，永远只出 **1 帧**（`nb_frames=1`）；`--output-format=h264` 也不流式吐，文件只在停止后一次性变大 |
 | MTK 的 `mtk_screenrecord` | ❌ `--enable-mfe`（直接编视频层）被 **SELinux** 挡住（shell 拿不到 `vendor.mediatek.tv.screenrecord` HAL，`avc: denied … tclass=hwservice_manager`）；`--disable-mfe` 又卡 `createAudioCaptureSource failed`；`adb root` 被 production build 拒绝 |
 | Moonlight 串流回来看 | ❌ 那是把电脑投到电视，方向反了 |
-| `scrcpy` | ⚠️ 没装、**没实测**。走 MediaCodec 是另一条链路，但**视频层大概率还是黑的**（mt5879 的视频是 MTK MFE 硬件层，不走 SurfaceFlinger 合成，所以连 vendor 工具都要 `--enable-mfe` 才能抓），可以拿它当"能用鼠标键盘操作电视 UI"的替代品 |
+| **`scrcpy`（5.0.1，2026-10-11 实测）** ✅/❌ | 走 MediaCodec（`OMX.MS.AVC.Encoder`）+ SurfaceControl 抓屏，本机 vaapi 解码：**界面/菜单 11~30 帧/秒**（画面在动才有帧，静止几乎不发帧——所以省带宽），而且**鼠标键盘能直接操作电视**。<br>但 **1080p 硬件视频层照样全黑**：录下来的帧和 `screencap` 逐像素相同（RMSE=0），只有 320x240 那种小片子两边都能看到 |
 | HDMI 采集卡 | ❌ 电视只有 HDMI **输入**口，没有视频输出，采集卡无从接起 |
 
 - **硬件解码的视频层抓不到**：DLNA 播 1080p 片子时抓出来**全黑**（源是彩条 YAVG=128 → 抓下来 YAVG=0），
@@ -392,6 +392,21 @@ tv-view --scrcpy           # 用 scrcpy（要先装，能鼠标键盘直接操�
    ```
 
    不想要浮动窗口的话删掉这条，或者直接用 `--full`。
+
+### scrcpy（`--scrcpy`，想要流畅/想操作电视就用它）
+
+台式机已经装好（`scrcpy 5.0.1` + `android-tools`，依赖 `sdl3`/`ffmpeg` 本来就有）：
+
+```bash
+tv-view --scrcpy            # 界面 11~30 帧/秒，鼠标键盘直接操作电视
+tv-view --scrcpy --audio    # 连声音一起抓（这台电视能不能出声音没测）
+```
+
+- 实测：server 733 KB 能推到电视（`49 MB/s`），电视端 `SurfaceControl` 抓屏、`OMX.MS.AVC.Encoder` 编码，
+  本机走 vaapi 解码（`/dev/dri/renderD128`）；窗口 3 秒出来。
+- **帧率跟着画面动没动走**：界面在动时录制 8 秒得 241 帧（**30 帧/秒**）；静止的屏保 6 秒只有 65 帧（11 帧/秒）；
+  1080p 视频在全黑时 6 秒 11 帧。所以它比 1 帧/秒的截图流强太多，但看片子仍然没戏。
+- 笔记本要装的话：`sudo pacman -S scrcpy`（约 3 MB，含 `android-tools`）。
 
 ### 其它
 

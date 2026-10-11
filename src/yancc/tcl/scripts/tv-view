@@ -8,7 +8,7 @@
   tv-view --full           全屏
   tv-view -s 1280x720      窗口大小（默认 1280x720）
   tv-view shot [文件]      截一张图（默认 ~/Pictures/tv-<时间>.png）
-  tv-view --scrcpy         用 scrcpy（要先装），能鼠标键盘直接操作电视
+  tv-view --scrcpy         用 scrcpy（要先装），界面流畅(11~30fps)能鼠标键盘直接操作电视
   tv-view --capture        强制用截图流（约 1 帧/秒）
   tv-view --addr 192.168.1.5:5555    换电视地址
 
@@ -25,9 +25,12 @@
   * **硬件解码的视频层抓不到**：DLNA 播 1080p 片子时抓出来全黑（源是彩条 YAVG=128，抓下来 YAVG=0），
     遥控/菜单却正常。小分辨率片子（320x240）能抓到，跟解码路径有关（MTK 的 MFE 视频层不走
     SurfaceFlinger 合成，所以要 vendor 的 mtk_screenrecord --enable-mfe 才能抓）。
-  * 结论：想在这台电视上看**流畅**画面，只剩两条路 —— 装 scrcpy 试（MediaCodec 走另一条链路，
-    没实测；即使能跑，视频层大概率还是黑的）或者用采集卡接电视输出（电视没有 HDMI 输出，
-    基本不可行）。默认的 screencap 流是「不用装任何东西」的方案。
+  * **scrcpy 已实测**（2026-10-11，scrcpy 5.0.1 + sdl3，电视端 server 能推、SurfaceControl 抓屏、
+    本机 vaapi 解码）：界面/菜单能到 11~30 帧/秒（画面在动才有帧，静止几乎不发帧），还能鼠标键盘
+    直接操作电视 —— 但**1080p 硬件视频层照样全黑**（录下来的帧和 screencap 一模一样，RMSE=0；
+    320x240 的小片子两边都能看到）。所以 scrcpy 的价值在「流畅看界面/操作电视」，看片子本身还是不行。
+  * 结论：想看**流畅**画面只有 scrcpy；想采集卡接电视也没戏（电视只有 HDMI 输入口）。
+    默认的 screencap 流是「不用装任何东西」的方案，装了 scrcpy 就 `--scrcpy`。
 
 实现坑（2026-10-11 实测，都是「往播放器 stdin 灌一串 PNG」这条路）：
   * 播放器要连收几帧才肯建窗口（mpv 要 7 帧，ffplay 要 3 帧左右），且跟分辨率无关。
@@ -120,6 +123,7 @@ def reap(*procs):
 
 
 def live_scrcpy(args):
+    """scrcpy 实时镜像（界面比截图流流畅得多，还能鼠标键盘直接操作电视）。"""
     scrcpy = shutil.which("scrcpy")
     if not scrcpy:
         raise SystemExit("没装 scrcpy：sudo pacman -S scrcpy（不装就用默认的截图流，约 1 帧/秒）")
@@ -151,8 +155,12 @@ def live_capture(args):
     cmd += ["-fs"] if args.full else ["-x", str(w), "-y", str(h)]
     print("看电视中（约 1 帧/秒：这台电视 screenrecord 是坏的，只能一帧帧截图刷；%s）…"
           % "Ctrl-C 或关窗口结束")
-    print("想要流畅画面：装 scrcpy 后用 tv-view --scrcpy（视频层可能仍全黑），"
-          "或采集卡接电视输出（这台电视没有 HDMI 输出）", file=sys.stderr)
+    if shutil.which("scrcpy"):
+        print("想要流畅 + 能操作电视：tv-view --scrcpy（界面 11~30 帧/秒；"
+              "但 1080p 视频层照样全黑）", file=sys.stderr)
+    else:
+        print("想要流畅画面：sudo pacman -S scrcpy 后用 tv-view --scrcpy（界面 11~30 帧/秒，"
+              "还能操作电视；但 1080p 视频层照样全黑）", file=sys.stderr)
     sys.stdout.flush()
     p_view = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     deadline = time.time() + args.time if args.time else None
