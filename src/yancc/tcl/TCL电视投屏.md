@@ -264,6 +264,7 @@ tv-show off                   # 停止，电视回桌面
 tv-play 电影.mp4              # 播放
 tv-play ~/剧集/第1季/          # 目录 → 按名字顺序连播，播完自动下一个
 tv-play -f 12:30 电影.mkv     # 从 12:30 开始
+tv-play --sub auto 电影.mkv   # 把字幕烧进画面再播（见下文「字幕」）
 tv-play pause | resume        # 暂停 / 继续
 tv-play seek 1:20 | seek +30 | seek -30
 tv-play next | status | stop
@@ -282,8 +283,8 @@ tv-play next | status | stop
 | gst 自制的 H.264 短片（mp4/mkv，10~65 秒） | ✅ 播放正常，连播时 mp4→mkv 自动衔接 |
 
 电视 `GetProtocolInfo` 的 Sink 里 video 一栏几乎是全家桶（mp4/mkv/avi/rmvb/ts/flv/wmv/mpeg…），
-所以**大部分片子不用转码**；真要转码得用 ffmpeg（这台机器的 ffmpeg 目前被 libass/fontconfig 的
-符号问题搞坏了：`undefined symbol: FcConfigSetDefaultSubstitute`，要先修系统包）。
+所以**大部分片子不用转码**。ffmpeg 之前被 fontconfig 钉版本坑坏过（`undefined symbol:
+FcConfigSetDefaultSubstitute`，见 `../archlinux.md`「ffmpeg 用不了」），已修好，现在烧字幕（libass）正常。
 
 ### 电视端的脾气（都实测过，脚本里绕开了）
 
@@ -310,8 +311,27 @@ tv-play next | status | stop
 
 ### 字幕
 
-DLNA 这条链路**没有字幕通道**：外挂 `.srt/.ass` 电视端看不到。mkv 内嵌字幕能不能显示取决于电视
-播放器（没测）。要硬字幕就得重编码烧进去（等 ffmpeg 修好再说）。
+DLNA 这条链路**没有字幕通道**：外挂 `.srt/.ass` 电视端看不到，mkv 内嵌字幕电视播放器也不理。
+所以 `tv-play` 默认**原样推流、不转码**；想要字幕只能用 ffmpeg 把字幕**烧进画面**再推：
+
+```bash
+tv-play --sub auto 电影.mkv         # 自动：先找同名外挂字幕（movie.srt / movie.zh.srt / movie.chs.ass…），
+                                    # 没有就用内嵌字幕（中文优先）
+tv-play --sub 字幕.srt 电影.mp4      # 指定外挂字幕文件（连播时会对每个文件都套一遍，慎用）
+tv-play -t chi 电影.mkv             # 只烧这条内嵌字幕流：ffprobe 全局序号（如 2）或语言/标题（chi、中文）
+tv-play -t 3 --size 1280x720 -q 23 电影.mkv   # 烧字幕时顺带缩放 + 调质量
+```
+
+- 烧一次 = 整个文件重新编码一遍（默认 libx264 CRF 20 / veryfast，台式机实测 1080p **约 0.8x 实时**，
+  90 秒的片子转 68 秒）。`-q` 调 CRF、`--preset ultrafast` 提速（文件更大）。
+  **笔记本**（`yancc-arcolinux`，AMD Phoenix1）有 `/dev/dri/renderD128`，用 `--encoder h264_vaapi`
+  走硬件编码快得多（实测 5 秒片子不到 1 秒，字幕照样烧进去）；**台式机**没有 `/dev/dri`，只能软编。
+- 转好的临时副本放 `~/.cache/tv-play/<pid>/`，`tv-play stop`/播完自动删；启动时顺手清掉崩溃残留。
+- 连播时**下一个文件在当前文件播放期间后台预转**，所以只有第一个文件开播要等；
+  `tv-play status` 这时显示 `TRANSCODING`，进度（每 10%）写在 `~/apps/tv/tv-play.log`。
+- 踩坑：`subtitles` 滤镜的 `si=` 是**"第几条字幕流"（从 0 数）**，不是 ffprobe 的全局 stream index
+  （给全局序号会报 `Unable to locate subtitle stream`）；滤镜参数里写文件名要转义 `\ : ' , [ ]`。
+- 图形字幕（PGS / DVD sub）烧不了，脚本会跳过并原样播。转码/烧录失败一律退回原片（只是没字幕）。
 
 ### 另一条路（没走，备查）
 

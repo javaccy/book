@@ -5,6 +5,7 @@
 用法:
   tv-play 视频文件...          播放（给多个文件/目录 = 按顺序连播，播完自动下一个）
   tv-play -f 12:30 视频...     从 12:30 开始播
+  tv-play --sub auto 视频...   把字幕烧进画面再播（默认不烧，见下面「字幕」）
   tv-play pause|resume         暂停 / 继续
   tv-play seek 12:30 | 90      拖动到指定位置（也支持 -30 / +30 相对拖动）
   tv-play next                 切到下一个（下一个文件/目录里的下一个）
@@ -20,13 +21,21 @@ com.tcl.MultiScreenInteraction_TV 的 PresentationActivity 播放。
     连播是我们每 2 秒轮询播放状态、播完再推下一个文件实现的
   * RenderingControl.SetVolume 返回 200 但音量不变 → 音量只能电视遥控器调
 
-字幕: DLNA 这条链路没有字幕通道，外挂 .srt/.ass 电视端看不到（mkv 内嵌字幕看播放器心情）。
+字幕（默认关，开了要重编码）: DLNA 这条链路没有字幕通道，外挂 .srt/.ass 电视端看不到。
+  想有字幕只能用 ffmpeg 把字幕烧进画面再推流: --sub auto（自动找同名外挂字幕，没有就用
+  内嵌、中文优先）/ --sub 字幕文件 / -t chi（指定内嵌字幕流）。代价是这个文件要整个重新
+  编码一遍（CPU 满转、要临时磁盘），所以默认不开，且播放列表里下一个文件会在当前文件
+  播放时后台预先转好。转发失败就退回原片（只是没字幕）。
 参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
 """
 
 import argparse
+import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -71,6 +80,368 @@ def collect(paths):
         else:
             d.log(TAG, "跳过（不存在）: %s" % p)
     return out
+
+
+# ------------------------------------------------------------------ 字幕烧录（可选）
+# DLNA 没有字幕通道 → 想有字幕只能把字幕烧进画面（重编码成 mp4）。默认关，
+# 开了以后每个要烧的文件先在本地转一份放到 ~/.cache/tv-play/<pid>/，再推给电视。
+SUBS_EXT = (".srt", ".ass", ".ssa", ".vtt", ".sub")
+SUBS_EXT_RANK = {".srt": 0, ".ass": 1, ".ssa": 2, ".vtt": 3, ".sub": 4}
+ZH_TAGS = ("zh", "chi", "zho", "chs", "cht", "cn", "sc", "tc", "简", "繁", "中")
+MP4_AUDIO = ("aac", "mp3", "ac3", "eac3", "alac")      # 能直接 -c:a copy 进 mp4 的音频
+BITMAP_SUBS = ("hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub")  # 图形字幕，烧不了
+VAAPI_DEVICE = os.environ.get("TCL_VAAPI_DEVICE", "/dev/dri/renderD128")
+CACHE_DIR = os.environ.get("TCL_PLAY_CACHE",
+                           os.path.join(os.path.expanduser("~/.cache"), "tv-play"))
+
+
+class Cancelled(Exception):
+    """tv-play stop/退出时把正在跑的转码中断掉，走这个异常（不当失败处理）。"""
+
+
+def probe_streams(path):
+    """ffprobe 列出所有流 → [{index,type,codec,lang,title}]（探测失败返回 []）。"""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=index,codec_type,codec_name:stream_tags=language,title",
+             "-of", "json", path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30).stdout
+        streams = json.loads(out).get("streams", [])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    res = []
+    for s in streams:
+        tags = s.get("tags") or {}
+        res.append({"index": s.get("index"), "type": s.get("codec_type"),
+                    "codec": s.get("codec_name") or "",
+                    "lang": (tags.get("language") or "").strip(),
+                    "title": (tags.get("title") or "").strip()})
+    return res
+
+
+def probe_duration(path):
+    """片长（秒），拿不到就 0（只影响进度百分比显示）。"""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "csv=p=0", path],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             text=True, timeout=30).stdout.strip()
+        return float(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def probe_audio_codec(path):
+    streams = [s for s in probe_streams(path) if s["type"] == "audio"]
+    return streams[0]["codec"] if streams else ""
+
+
+def external_subtitle(video):
+    """找同名外挂字幕: movie.srt / movie.zh.srt / movie.chs.ass …（中文优先）。"""
+    folder = os.path.dirname(video) or "."
+    base = os.path.splitext(os.path.basename(video))[0]
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+    best = None
+    for n in names:
+        ext = os.path.splitext(n)[1].lower()
+        if ext not in SUBS_EXT:
+            continue
+        stem = n[:-len(ext)]
+        if stem != base and not stem.startswith(base + "."):    # 必须是同名的（可带语言后缀）
+            continue
+        lang = stem[len(base):].lstrip(".").lower()
+        key = (0 if any(t in lang for t in ZH_TAGS) else 1, SUBS_EXT_RANK.get(ext, 9), n)
+        if best is None or key < best[0]:
+            best = (key, os.path.join(folder, n))
+    return best[1] if best else None
+
+
+def embedded_subtitle(video, track=""):
+    """选一条内嵌字幕流，返回 {index, si, label}。
+
+    index = ffprobe 里那条流的全局序号（给人看、给 --track 用）；
+    si = subtitles 滤镜要的序号，它是"第几条字幕流"（从 0 数，实测），不是全局序号。
+    track 给序号/语言就按它选，否则中文优先、再第一条文本字幕；图形字幕(PGS/DVD)烧不了。
+    """
+    subs = [s for s in probe_streams(video) if s["type"] == "subtitle"]
+    text = [s for s in subs if s["codec"] not in BITMAP_SUBS]
+    hit = None
+    if track:
+        t = track.lower()
+        if track.isdigit():
+            n = int(track)
+            hit = next((s for s in subs if s["index"] == n), None)      # 先按全局序号
+            if hit is None and 0 <= n < len(subs):                      # 再接受"第几条字幕"
+                hit = subs[n]
+            if hit and hit["codec"] in BITMAP_SUBS:
+                d.log(TAG, "字幕流 %s 是图形字幕(%s)，烧不了，跳过" % (track, hit["codec"]))
+                return None
+        else:
+            hit = next((s for s in text if t in (s["lang"] + " " + s["title"]).lower()), None)
+    elif text:
+        zh = [s for s in text if any(x in (s["lang"] + " " + s["title"]).lower() for x in ZH_TAGS)]
+        hit = (zh or text)[0]
+    if not hit:
+        return None
+    return {"index": hit["index"],
+            "si": next(i for i, s in enumerate(subs) if s["index"] == hit["index"]),
+            "label": hit["title"] or hit["lang"] or ("字幕流 %d" % hit["index"])}
+
+
+def burn_plan(video, opt):
+    """这个文件要不要烧字幕、怎么烧；返回 None = 不烧，原样推流。"""
+    mode, track = opt["sub"], opt["track"]
+    if mode not in ("none", "auto"):                    # --sub 直接给了字幕文件
+        return {"kind": "external", "file": os.path.abspath(mode)}
+    if mode == "none" and not track:
+        return None
+    if mode == "auto":
+        ext = external_subtitle(video)
+        if ext:
+            return {"kind": "external", "file": ext}
+    emb = embedded_subtitle(video, track)
+    if emb:
+        return {"kind": "embedded", "si": emb["si"], "index": emb["index"], "label": emb["label"]}
+    return None
+
+
+_FILTER_ESCAPE = "\\'[]:;,"
+
+
+def esc_filter(path):
+    """ffmpeg 滤镜参数里写路径要转义（冒号、逗号、方括号、单引号…）。"""
+    return "".join("\\" + c if c in _FILTER_ESCAPE else c for c in path)
+
+
+def spec_text(spec, video):
+    if spec["kind"] == "external":
+        return os.path.basename(spec["file"])
+    return "内嵌字幕「%s」" % spec["label"]
+
+
+def vf_chain(video, spec, opt):
+    """字幕用 subtitles 滤镜烧进画面；外挂给文件名，内嵌给片源 + si=流序号。"""
+    if spec["kind"] == "external":
+        chain = ["subtitles=%s" % esc_filter(spec["file"])]
+    else:
+        chain = ["subtitles=%s:si=%d" % (esc_filter(video), spec["si"])]
+    if opt["size"]:
+        chain.append("scale=%d:%d" % opt["size"])
+    if opt["encoder"].endswith("_vaapi"):
+        chain += ["format=nv12", "hwupload"]
+    return ",".join(chain)
+
+
+def ffmpeg_cmd(video, dst, spec, opt, audio_args):
+    args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+            "-progress", "pipe:1", "-nostats"]
+    if opt["encoder"].endswith("_vaapi"):
+        args += ["-vaapi_device", VAAPI_DEVICE]
+    args += ["-i", video, "-map", "0:v:0", "-map", "0:a:0?", "-sn",
+             "-vf", vf_chain(video, spec, opt)]
+    if opt["encoder"] == "libx264":
+        args += ["-c:v", "libx264", "-preset", opt["preset"], "-crf", str(opt["crf"]),
+                 "-pix_fmt", "yuv420p"]
+    else:
+        args += ["-c:v", opt["encoder"], "-qp", str(opt["crf"])]
+    args += audio_args + ["-movflags", "+faststart", dst]
+    return args
+
+
+def parse_size(text):
+    if not text:
+        return None
+    parts = re.split(r"[xX:]", text.strip())
+    if len(parts) != 2:
+        raise SystemExit("--size 要写成 1280x720（宽x高）")
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        raise SystemExit("--size 的宽高要是数字，如 1280x720")
+
+
+def prune_cache(keep):
+    """清掉以前跑崩留下的转码残留（子目录名就是 PID，进程还活着的留着）。"""
+    try:
+        entries = os.listdir(CACHE_DIR)
+    except OSError:
+        return
+    for name in entries:
+        path = os.path.join(CACHE_DIR, name)
+        if name == keep or not os.path.isdir(path):
+            continue
+        if name.isdigit() and d.pid_alive(int(name)):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+
+class Burner(threading.Thread):
+    """按需把文件转成「字幕已烧进画面」的临时 mp4；单线程串行转，转好放进 served。"""
+
+    def __init__(self, files, opt, served, tmpdir):
+        super().__init__(daemon=True)
+        self.files, self.opt, self.served, self.tmpdir = files, opt, served, tmpdir
+        self.cv = threading.Condition()
+        self.queue, self.done, self.plans = [], {}, {}
+        self.proc, self.stopping = None, False
+
+    def _original(self, idx):
+        path, mime, profile = self.files[idx]
+        return {"url": "/v/%d%s" % (idx, os.path.splitext(path)[1].lower()),
+                "file": path, "mime": mime, "profile": profile,
+                "label": os.path.basename(path), "burned": False}
+
+    def plan(self, idx):
+        if idx not in self.plans:
+            try:
+                self.plans[idx] = burn_plan(self.files[idx][0], self.opt)
+            except Exception as e:                      # noqa: BLE001
+                d.log(TAG, "字幕探测失败（%s），这个文件原样播" % e)
+                self.plans[idx] = None
+        return self.plans[idx]
+
+    def needs(self, idx):
+        return 0 <= idx < len(self.files) and self.plan(idx) is not None
+
+    def prefetch(self, idx):
+        """提前把第 idx 个排上（当前文件在播时，后台先把下一个转好）。"""
+        if not (0 <= idx < len(self.files)):
+            return
+        if not self.needs(idx):
+            self.done[idx] = self._original(idx)
+            return
+        with self.cv:
+            if idx in self.done or idx in self.queue:
+                return
+            self.queue.append(idx)
+            self.cv.notify_all()
+
+    def ensure(self, idx):
+        """第 idx 个可以播的信息；要烧字幕就在这里等它转完。"""
+        self.prefetch(idx)
+        with self.cv:
+            while idx not in self.done:
+                self.cv.wait(0.5)
+            return self.done[idx]
+
+    def stop(self):
+        """停掉调度线程和正在跑的 ffmpeg（不然 tv-play stop 会留下转码进程占 CPU）。"""
+        with self.cv:
+            self.stopping = True
+            self.queue.clear()
+            self.cv.notify_all()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            self._kill(self.proc)
+            if not self.is_alive():
+                return
+            time.sleep(0.1)
+        self._kill(self.proc)
+        self.join(timeout=3)
+
+    @staticmethod
+    def _kill(proc):
+        """转码的 ffmpeg 单独一个进程组，整组杀干净（SIGKILL，别等它写完）。"""
+        if not proc or proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def run(self):
+        while True:
+            with self.cv:
+                while not self.queue and not self.stopping:
+                    self.cv.wait()
+                if self.stopping:
+                    return
+                idx = self.queue.pop(0)
+            media = self._burn(idx)
+            with self.cv:
+                self.done[idx] = media
+                self.cv.notify_all()
+
+    def _burn(self, idx):
+        spec, video = self.plan(idx), self.files[idx][0]
+        if not spec or self.stopping:
+            return self._original(idx)
+        dst = os.path.join(self.tmpdir, "%03d.burn.mp4" % idx)
+        try:
+            self._transcode(video, dst, spec, idx)
+        except Cancelled:
+            d.log(TAG, "字幕烧录被取消: %s" % video)
+            if os.path.exists(dst):
+                os.unlink(dst)
+            return self._original(idx)
+        except Exception as e:                          # noqa: BLE001
+            d.log(TAG, "字幕烧录失败（%s），这个文件原样播: %s" % (e, video))
+            d.note(TAG, "字幕烧录失败，原样播放", os.path.basename(video))
+            if os.path.exists(dst):
+                os.unlink(dst)
+            return self._original(idx)
+        media = {"url": "/v/%d.burn.mp4" % idx, "file": dst, "mime": "video/mp4",
+                 "profile": "AVC_MP4_HP_HD_AAC",
+                 "label": os.path.basename(video), "burned": True}
+        self.served[media["url"]] = {"file": dst, "mime": media["mime"],
+                                     "features": d.features(media["profile"]),
+                                     "transfer": "Streaming"}
+        return media
+
+    def _transcode(self, video, dst, spec, idx):
+        total = probe_duration(video)
+        variants = [["-c:a", "aac", "-b:a", "192k"]]
+        if probe_audio_codec(video) in MP4_AUDIO:
+            variants.insert(0, ["-c:a", "copy"])        # 音频能直接搬就不重编码
+        d.log(TAG, "烧录字幕 [%d/%d] %s ← %s" % (idx + 1, len(self.files),
+                                                 os.path.basename(video), spec_text(spec, video)))
+        d.note(TAG, "正在烧录字幕（重编码）", os.path.basename(video))
+        err = ""
+        for audio_args in variants:
+            if self.stopping:
+                raise Cancelled()
+            code, err = self._ffmpeg(ffmpeg_cmd(video, dst, spec, self.opt, audio_args), total, idx)
+            if code == 0:
+                d.log(TAG, "烧录完成: %s（%.0f MB）" % (dst, os.path.getsize(dst) / 1048576))
+                return
+            if os.path.exists(dst):
+                os.unlink(dst)
+        if self.stopping:
+            raise Cancelled()
+        raise RuntimeError((err.strip().splitlines() or ["ffmpeg 非 0 退出"])[-1])
+
+    def _ffmpeg(self, cmd, total, idx):
+        d.log(TAG, "ffmpeg: %s" % " ".join("'%s'" % a if " " in a else a for a in cmd))
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, text=True, bufsize=1,
+                                     start_new_session=True)   # 自己的进程组，stop 时能整组杀
+        keys = ("frame=", "fps=", "bitrate=", "total_size=", "out_time=", "out_time_ms=",
+                "out_time_us=", "dup_frames=", "drop_frames=", "speed=", "progress=",
+                "stream_")
+        tail, pct = [], -1
+        for line in self.proc.stdout:
+            line = line.rstrip("\n")
+            if line.startswith("out_time_us=") and total:
+                try:
+                    p = min(99, int(int(line.split("=", 1)[1]) * 100 / (total * 1000000)))
+                except ValueError:
+                    continue
+                if p >= pct + 10:
+                    pct = p - p % 10
+                    d.log(TAG, "字幕烧录 %d%%（%d/%d）" % (pct, idx + 1, len(self.files)))
+            elif line and not line.startswith(keys):
+                tail.append(line)
+                del tail[:-20]
+        code = self.proc.wait()
+        self.proc = None
+        return code, "\n".join(tail)
 
 
 def ctrl_url(wake=False):
@@ -124,22 +495,21 @@ def send(action, args=None, tries=6, gap=3.0, ready=None):
 
 
 # ------------------------------------------------------------------ 后台播放
-def play_url(idx, files, srv, ctrl, from_pos=0):
-    path, mime, profile = files[idx]
-    ext = os.path.splitext(path)[1].lower()
-    url = srv.url("/v/%d%s" % (idx, ext))
-    d.push(ctrl, url, mime, profile, os.path.basename(path),
+def play_url(idx, files, srv, ctrl, media, from_pos=0):
+    url = srv.url(media["url"])
+    d.push(ctrl, url, media["mime"], media["profile"], media["label"],
            upnp_class="object.item.videoItem", transfer="Streaming")
-    d.log(TAG, "开播 [%d/%d] %s" % (idx + 1, len(files), path))
+    d.log(TAG, "开播 [%d/%d] %s%s" % (idx + 1, len(files), files[idx][0],
+                                      "（字幕已烧进画面）" if media["burned"] else ""))
     if from_pos:
         time.sleep(2.0)                                 # 等电视真的开始播再 Seek，早了会被丢掉
         d.soap(ctrl, "Seek", {"InstanceID": 0, "Unit": "REL_TIME",
                               "Target": d.fmt_time(from_pos)})
-    d.write_state(TAG, {**d.read_state(TAG), "index": idx, "playing": path,
-                        "files": len(files), "port": srv.port})
+    d.write_state(TAG, {**d.read_state(TAG), "index": idx, "playing": files[idx][0],
+                        "files": len(files), "port": srv.port, "state": "PLAYING"})
 
 
-def worker(files, from_pos):
+def worker(files, from_pos, opt):
     d.write_state(TAG, {**d.read_state(TAG), "pid": os.getpid(), "state": "STARTING"})
     d.kill_daemon("tv-show")                            # 图片和视频抢同一个渲染器，先从图片模式退出来
     ctrl = d.discover(TAG, tries=20, wait=3.0)
@@ -148,25 +518,43 @@ def worker(files, from_pos):
         served["/v/%d%s" % (i, os.path.splitext(path)[1].lower())] = {
             "file": path, "mime": mime, "features": d.features(profile), "transfer": "Streaming"}
     srv = d.Server(served, TAG)
+    tmpdir = os.path.join(CACHE_DIR, str(os.getpid()))
+    os.makedirs(tmpdir, exist_ok=True)
+    prune_cache(str(os.getpid()))
+    burner = Burner(files, opt, served, tmpdir)
+    burner.start()
+    if opt["sub"] != "none" or opt["track"]:
+        free = shutil.disk_usage(tmpdir).free
+        d.log(TAG, "字幕缓存 %s（剩 %.1f GB）" % (tmpdir, free / 2 ** 30))
+        if free < 4 * 2 ** 30:                          # 长片烧一份副本要几个 GB
+            d.log(TAG, "警告: 剩余空间不到 4 GB，长片的转码副本可能放不下")
     d.write_state(TAG, {**d.read_state(TAG), "pid": os.getpid(), "avt": ctrl,
                         "port": srv.port, "files": len(files), "index": 0,
-                        "state": "PLAYING"})
-    play_url(0, files, srv, ctrl, from_pos)
-
+                        "state": "STARTING"})
     idx, stopped_reads = 0, 0
+
+    def cue(i, start=0):
+        """切到第 i 个：要烧字幕就先等转完（等待期状态写 TRANSCODING），再推给电视。"""
+        if burner.needs(i):
+            d.write_state(TAG, {**d.read_state(TAG), "state": "TRANSCODING"})
+            d.log(TAG, "等字幕烧录完成再开播 [%d/%d] %s" % (i + 1, len(files), files[i][0]))
+        play_url(i, files, srv, ctrl, burner.ensure(i), start)
+        burner.prefetch(i + 1)
+
     try:
+        cue(0, from_pos)
         while True:
             time.sleep(2.0)
             if os.path.exists(REPLAY):                  # tv-play resume 发现已经播完 → 重推当前文件
                 os.unlink(REPLAY)
-                play_url(idx, files, srv, ctrl)
+                cue(idx)
                 continue
             if os.path.exists(SKIP):
                 # tv-play next：不让电视的 DMR 切（会被拒），由守护进程直接推下一个文件。
                 # 用哨兵文件而不是 state 字段 —— 两边都在写 state，会互相覆盖。
                 os.unlink(SKIP)
                 idx = min(idx + 1, len(files) - 1)
-                play_url(idx, files, srv, ctrl)
+                cue(idx)
                 continue
             state = d.transport_state(ctrl)
             if state == "OFFLINE":
@@ -185,8 +573,10 @@ def worker(files, from_pos):
                     d.log(TAG, "播放列表结束（%d 个文件）" % len(files))
                     d.write_state(TAG, {**d.read_state(TAG), "state": "FINISHED", "rel": ""})
                     break
-                play_url(idx, files, srv, ctrl)
+                cue(idx)
     finally:
+        burner.stop()
+        shutil.rmtree(tmpdir, ignore_errors=True)
         srv.shutdown()
         d.clear_state(TAG, os.getpid())                 # 别留过期的 state 骗下一个命令
         if os.path.exists(SKIP):
@@ -201,25 +591,61 @@ def start(args):
     if not files:
         print("没有可播放的视频（支持 %s）" % " ".join(sorted(VIDEO)), file=sys.stderr)
         return 1
+    sub = args.sub
+    if sub is None:
+        sub = "none"                                      # 只给 -t 时 = 只烧这条内嵌字幕
+    if sub not in ("none", "auto"):
+        sub = os.path.abspath(os.path.expanduser(sub))
+        if not os.path.isfile(sub):
+            raise SystemExit("字幕文件不存在: %s" % sub)
+        if len(files) > 1:
+            print("注意: 这个字幕文件会套到列表里全部 %d 个文件上，对不上就是白烧"
+                  % len(files), file=sys.stderr)
+    if args.encoder.endswith("_vaapi") and not os.path.exists(VAAPI_DEVICE):
+        raise SystemExit("没有 %s，硬件编码用不了，请用 --encoder libx264" % VAAPI_DEVICE)
+    opt = {"sub": sub, "track": args.track or "", "encoder": args.encoder,
+           "crf": args.quality, "preset": args.preset, "size": parse_size(args.size)}
     d.log(TAG, "待播放 %d 个文件%s" % (len(files),
                                        "，从 %s 开始" % d.fmt_time(args.from_pos) if args.from_pos else ""))
+    hint = None
+    if sub != "none" or args.track:
+        try:
+            spec = burn_plan(files[0][0], opt)
+        except Exception as e:                          # noqa: BLE001
+            d.log(TAG, "字幕探测失败（%s）" % e)
+            spec = None
+        if spec:
+            hint = spec_text(spec, files[0][0])
     if args.foreground:
         print("前台运行（Ctrl-C 结束）")
-        worker(files, args.from_pos)
+        worker(files, args.from_pos, opt)
         return 0
+    if hint:
+        print("第一个文件要烧字幕（%s），要重新编码，开播会慢一点…" % hint,
+              file=sys.stderr, flush=True)
     pid = d.daemonize(TAG)
     if pid == 0:
         try:
-            worker(files, args.from_pos)
+            worker(files, args.from_pos, opt)
         finally:
             os._exit(0)
-    st = d.wait_ready(TAG, pid, "playing", timeout=120)
+    deadline, told = time.time() + (7200 if hint else 120), False
+    st = d.read_state(TAG)
+    while time.time() < deadline:
+        st = d.read_state(TAG)
+        if st.get("playing") or not d.pid_alive(pid):
+            break
+        if st.get("state") == "TRANSCODING" and not told:
+            print("正在烧录字幕…进度看 %s/tv-play.log" % d.TV_DIR, file=sys.stderr, flush=True)
+            told = True
+        time.sleep(0.5)
     if not st.get("playing"):
         print("没能开播（state=%s），看看 %s/tv-play.log" % (st.get("state", "?"), d.TV_DIR),
               file=sys.stderr)
         return 1
-    print("已开播：%s%s" % (os.path.basename(files[0][0]),
-                            "（共 %d 个，播完自动下一个）" % len(files) if len(files) > 1 else ""))
+    print("已开播：%s%s%s" % (os.path.basename(files[0][0]),
+                              "（共 %d 个，播完自动下一个）" % len(files) if len(files) > 1 else "",
+                              "（字幕已烧进画面）" if hint else ""))
     d.note(TAG, "电视开始播放", os.path.basename(files[0][0]))
     return 0
 
@@ -260,6 +686,10 @@ def status():
     idx = st.get("index")
     total = st.get("files")
     where = " [%s/%s]" % (idx + 1, total) if isinstance(idx, int) and total else ""
+    if st.get("state") == "TRANSCODING":
+        print("第 %s/%s 个文件正在烧字幕（重编码中，还没开播），进度看 %s/tv-play.log"
+              % ((idx + 1) if isinstance(idx, int) else "?", total or "?", d.TV_DIR))
+        return 0
     print("%s%s  %s  %s / %s" % (os.path.basename(str(playing)), where, state, rel, dur))
     return 0
 
@@ -353,6 +783,20 @@ def main():
     ap.add_argument("-f", "--from", dest="from_pos", default="",
                     help="从指定位置开始，如 12:30")
     ap.add_argument("-F", "--foreground", action="store_true", help="前台运行（调试）")
+    ap.add_argument("-s", "--sub", default=None, metavar="MODE|FILE",
+                    help="烧字幕（默认 none 不烧）: none / auto（自动找同名外挂字幕，"
+                         "没有就用内嵌、中文优先）/ 直接给一个字幕文件路径")
+    ap.add_argument("-t", "--track", default="", metavar="N|LANG",
+                    help="内嵌字幕流：ffprobe 的序号或语言/标题（chi、中文…）；"
+                         "只给 -t = 只烧这条内嵌字幕，配 --sub auto 则是「外挂优先、没有再用它」")
+    ap.add_argument("-q", "--quality", type=int, default=20, metavar="CRF",
+                    help="重编码质量（libx264 的 CRF，默认 20，越小越清晰、文件越大）")
+    ap.add_argument("--preset", default="veryfast", help="libx264 preset（默认 veryfast）")
+    ap.add_argument("--encoder", default="libx264",
+                    choices=("libx264", "h264_vaapi", "hevc_vaapi"),
+                    help="重编码编码器（默认 libx264；vaapi 要 /dev/dri/renderD128）")
+    ap.add_argument("--size", default="", metavar="WxH",
+                    help="烧字幕时顺便缩放，如 1280x720（不填保持原分辨率）")
     a = ap.parse_args()
     a.from_pos = d.parse_time(a.from_pos) if a.from_pos else 0
     if (a.paths[:1] or [""])[0] == "on":

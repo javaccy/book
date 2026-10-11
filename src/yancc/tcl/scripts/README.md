@@ -44,6 +44,10 @@ tv-play seek 12:30     # 拖到 12:30（也支持 +30 / -30 相对拖动）
 tv-play next           # 切下一个
 tv-play status         # 当前文件 + 状态 + 进度
 tv-play stop           # 停止，电视回桌面
+tv-play --sub auto 电影.mkv   # 把字幕烧进画面再播（默认不烧；auto=同名外挂优先，没有就用内嵌、中文优先）
+tv-play --sub 字幕.srt 电影.mp4  # 指定外挂字幕文件
+tv-play -t chi 电影.mkv        # 只烧这条内嵌字幕流（给 ffprobe 序号或语言；不看外挂字幕）
+tv-play --sub auto --size 1280x720 -q 23 电影.mkv   # 烧字幕时顺带缩放 / 调质量
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
@@ -55,6 +59,13 @@ tv-play stop           # 停止，电视回桌面
 3 张幻灯片轮转正常；视频 5 秒起播，暂停/拖动/连播都通，两个脚本会互相抢渲染器（后启动的赢）。
 
 `tv-show` 和 `tv-play` 不能同时用（共用同一个渲染器）：谁后启动谁的守护进程会先把对方的杀掉。
+
+`tv-play` 默认**原样推流、不转码**。要字幕得加 `--sub`：DLNA 这条链路没有字幕通道，只能本地用 ffmpeg
+把字幕烧进画面（重编码，实测 1080p 约 0.8x 实时）再推。转好的临时副本在 `~/.cache/tv-play/<pid>/`，
+`tv-play stop`/播完自动删；连播时下一个文件在当前文件播放期间后台预转，所以只有第一个文件开播要等，
+`tv-play status` 会显示 `TRANSCODING`、进度看 `~/apps/tv/tv-play.log`。转失败就退回原片（只是没字幕）。
+重编码默认软编（`libx264`）；笔记本有 `/dev/dri/renderD128`，可 `--encoder h264_vaapi` 硬件加速，
+台式机没有 `/dev/dri` 只能用 `libx264`。
 
 常用环境变量：`TCL_SHOW_INTERVAL`（`tv-show` 默认间隔秒数，默认 15）、`TCL_TV_ADDR`（默认 `192.168.144.188:5555`）、`TCL_PC_NAME`（默认 `$(hostname)`，
 即 PcView 里要点的电脑卡片名）、`TCL_TV_MAC`（设了才会在 adb 掉线时补发 WOL）、`TCL_VIDEO_APPS`
