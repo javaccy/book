@@ -399,7 +399,7 @@ tv-view --scrcpy           # 用 scrcpy（要先装）：界面 11~30 帧/秒，
 
 ```bash
 tv-view --scrcpy            # 界面 11~30 帧/秒，鼠标键盘直接操作电视
-tv-view --scrcpy --audio    # 连声音一起抓（这台电视能不能出声音没测）
+tv-view --scrcpy --audio    # 连声音一起抓（实测能出声音，见下）
 ```
 
 - 实测：server 733 KB 能推到电视（`49 MB/s`），电视端 `SurfaceControl` 抓屏、`OMX.MS.AVC.Encoder` 编码，
@@ -409,18 +409,42 @@ tv-view --scrcpy --audio    # 连声音一起抓（这台电视能不能出声�
 - 笔记本要装的话：`sudo pacman -S scrcpy`（约 3 MB，含 `android-tools`）。
 - **抓声音必须指定 aac**：这台电视的音频编码器只有 aac/flac（`scrcpy --list-encoders` 实测），
   而 scrcpy 的默认是 opus → 不加 `--audio-codec=aac` 会直接
-  `Could not create default audio encoder for opus` 挂掉。`tv-view --scrcpy --audio` 已经自动带上 aac
-  （想换用 `--audio-codec flac`）。
+  `Could not create default audio encoder for opus` 挂掉（整个 server 线程死掉，连视频一起断）。
+  `tv-view --scrcpy --audio` 已经自动带上 aac（想换用 `--audio-codec flac`）。
+- **音频源默认的 `playback` 也采不到**（2026-10-11 实测）：server 端
+  `Could not read audio: 0`（AudioRecord 读回 0 字节）→ 录出来只有视频没有音轨。
+  换 **`--audio-source=output`** 就正常了：录出 aac 48000 Hz 立体声、`volumedetect` 显示
+  mean -36.9 dB / max -24.3 dB（真声音，不是静音）。`tv-view` 的 `--audio` 现在默认就用 output；
+  代价是 scrcpy 文档说的「disables playback on the device」——镜像期间电视自己的喇叭不出声。
+  （`--audio-source=mic` 也能出音轨，走电视麦克风录环境音。）
 
 ### 电视的编解码服务会卡死（2026-10-11 踩到）
 
-跑多了 scrcpy、又用 DLNA 播过视频之后，电视端的编解码服务（Codec2 HAL / `media.swcodec`）会挂：
-`media.codec` 从 `service list` 里消失、`screenrecord` 跑起来卡死、scrcpy 停在
-`Creating encoder by name: …` 然后客户端报 `stream disabled due to connection error`（换 aac/flac、
-换 google/vp8 编码器都一样）。此时 `screencap`、`dumpsys`、`input` 全都正常，只有要 MediaCodec 的挂。
+跑多了 scrcpy、又用 DLNA 播过视频之后，电视端的编解码服务（Codec2 HAL / `media.swcodec`）会挂。
+2026-10-11 又踩了一次，症状和判定方法：
 
-**修法：把电视重启一次**（遥控器电源键关掉再开）。注意它跟「抓不到视频层」是两码事：
-前者是软件卡死、重启就好；后者（1080p 全黑）是 MTK MFE 硬件视频层不走 GPU 合成的硬限制，重启也抓不到。
+- scrcpy 客户端报 `ERROR: Demuxer 'video': stream disabled due to connection error` +
+  `WARN: Device disconnected`（换 aac/flac、换 google/vp8 编码器都一样）。
+- **判定它是不是电视端挂了**，别猜，直接跑电视自己的编码器：
+
+  ```bash
+  adb -s 192.168.144.188:5555 shell 'rm -f /sdcard/sr.mp4; timeout 12 screenrecord --time-limit 2 /sdcard/sr.mp4; echo rc=$?; ls -l /sdcard/sr.mp4'
+  # 挂了：rc=124 且 sr.mp4 是 0 字节（正常应该 rc=0 且 ~1 MB）
+  ```
+
+  此时 `screencap`、`dumpsys`、`input`、`ps` 全都正常，`media.codec`/`media.swcodec` 进程也还在，
+  只有要 MediaCodec 编解码的挂 —— 所以看进程列表看不出来，得靠上面这条。
+- **修法：把电视重启一次**：
+
+  ```bash
+  adb -s 192.168.144.188:5555 reboot      # persist.adb.tcp.port=5555，重启后 adb 自动回来
+  ```
+
+  实测重启后 `screenrecord` 立刻恢复到 rc=0、1 MB 产物，scrcpy 也马上能录 1920x1080 h264。
+  重启大约 40 秒（轮询 `getprop sys.boot_completed` 到 1）。
+
+注意它跟「抓不到视频层」是两码事：前者是软件卡死、重启就好；后者（1080p 全黑）是 MTK MFE
+硬件视频层不走 GPU 合成的硬限制，重启也抓不到。
 
 ### 其它
 
