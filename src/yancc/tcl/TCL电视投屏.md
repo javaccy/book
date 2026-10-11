@@ -541,6 +541,62 @@ tv-mirror --mode popup   # 换成浮动小窗；--mode full / --full 全屏
 - 电视在画报屏保/待机时也能抓（画面就是屏保内容）；电视整机待机（网络断了）时 `tv-view` 会提示先 `tv-on.sh`。
 - 只想快速看一眼：`tv-view shot` 会存到 `~/Pictures/tv-<时间>.png`。
 
+## 远程控制电视音量（`tv-vol`，2026-10-11）
+
+```bash
+tv-vol            # 看当前音量 + 输出设备 + 静音状态
+tv-vol up 3       # 音量加 3 格（默认 1）
+tv-vol down 3     # 音量减 3 格
+tv-vol set 20     # 绝对设值；tv-vol 20 是简写（范围 0~100，= ro.config.media_vol_steps）
+tv-vol mute | unmute | toggle
+```
+
+原理就是 `input keyevent KEYCODE_VOLUME_UP/DOWN/MUTE`。**这台电视用遥控器调音量本来就走的
+Android AudioService** —— 实测按一下遥控器音量加，`settings get system volume_music_speaker`
+就 +1，所以注入同样的按键 == 按遥控器。静音键（`KEYCODE_VOLUME_MUTE`，164）也真的会静音。
+
+注意音量条是**电视固件层**画的：`adb screencap`、`screenrecord`（60fps 逐帧找过）、scrcpy
+镜像里**全都看不到**音量条，只有人眼看电视屏幕能看到。所以别指望靠截图验证。
+
+### 踩坑：`tv-mirror --audio` 会劫持音频路由，连遥控器都失灵（重要）
+
+`tv-mirror --audio`（scrcpy 抓音，走 AudioPlaybackCapture / remote_submix）会把
+`STREAM_MUSIC` 的输出设备从 `speaker` 抢到虚拟设备 `remote_submix`：
+
+```
+- STREAM_MUSIC:
+   streamVolume:67
+   Current: 2 (speaker): 25, ..., 8000 (remote_submix): 67
+   Devices: remote_submix          ← 被劫持了
+```
+
+后果（2026-10-11 都实测过）：
+
+- 音量键改的是 `volume_music_remote_submix`，`volume_music_speaker` 纹丝不动 →
+  **电视喇叭音量不变**；脚本注入的按键和**实体遥控器**都一样失效（开着抓音时按遥控器，
+  24 秒监测 `settings get system volume_music*` 零变化）。
+- 想验证音量时**必须先把 `tv-mirror` 关掉**（注意：只去掉 `--audio` 也行，但关掉最干净）。
+
+**恢复**：关掉 `tv-mirror` 后路由仍可能残留（scrcpy 进程已退、`Devices:` 还是
+`remote_submix`）。实测 `adb reboot` 重启电视后立刻恢复 `Devices: speaker`，按键
+25→30→28 正常。`tv-vol` 检测到 `remote_submix` 时会往 stderr 打警告。
+
+（抓音态下还试过 `cmd media_session volume --stream 3 --set N`、
+`settings put system volume_music_speaker N`、DLNA `RenderingControl SetVolume`：
+要么只改抓音支路，要么纯摆设——DLNA `GetVolume` 一会儿回 28 一会儿回 0——都不可靠，没用。）
+
+### 试过但不通的路（备查）
+
+- `media` 二进制：这台电视没有。
+- `cmd media_session volume --stream 3 --get`：rc=0 但**什么都不打印**（读值只能靠 `dumpsys audio`）。
+- `cmd media_session volume --stream 3 --set N`：能改 `dumpsys` 里的数字，但不是电视真正用的那条路。
+- `settings put system volume_music_speaker N`：值写进去了，喇叭不动。
+- 电视自己的 ALSA：`tinymix` 存在但 `Failed to open mixer`（无 root：`adb root` 回
+  `adbd cannot run as root in production builds`）。
+- **HDMI-CEC 音量键**：树莓派发 `ui-cmd=volume-up` 电视没反应；但同一条 CEC 通道的**方向键是有效的**
+  （发 `ui-cmd=down` x3，Android 主页焦点从「信号源」移到了德玛西亚杯卡片、页面还跟着滚了），
+  说明 CEC 链路本身是通的，只是这台电视不认 CEC 音量。
+
 ## TCL 电视的前台抢占规律（重要）
 
 - 第三方 App 打开后 **3~5 秒**会被系统拉回"小电视影视"（yst）或启动器，adb 注入的按键**不重置**这个计时器

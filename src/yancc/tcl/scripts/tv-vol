@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# 远程控制电视音量（等价于按遥控器的音量加/减/静音键）。
+# 参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
+#
+# 原理：`input keyevent KEYCODE_VOLUME_UP/DOWN/MUTE`。这台电视（TCL mt5879 / Android 11）
+# 用遥控器调音量本来就是走 Android 的 AudioService（实测遥控器按一下，`volume_music_speaker`
+# 就 +1），所以注入同样的按键 == 按遥控器。音量条是电视固件层画的，adb 截屏/录屏都看不到，
+# 只能人眼看电视屏幕确认。
+#
+# ⚠️ 已知坑：`tv-mirror --audio`（scrcpy 抓音）会把电视音频路由劫持到虚拟设备
+#    `remote_submix`，这时音量键改的是**抓音支路**，电视喇叭不受影响，
+#    而且**连实体遥控器的音量键也会失效**。关掉 tv-mirror / 重启电视后恢复。
+#    （2026-10-11 实测：劫持态下 Devices=remote_submix，speaker 值纹丝不动；
+#      重启电视后 Devices=speaker，按键 25→30→28 正常。）
+#
+# 用法:
+#   tv-vol                显示当前音量 + 输出设备（等同 get/status）
+#   tv-vol up [n]         音量加 n 格（默认 1）
+#   tv-vol down [n]       音量减 n 格（默认 1）
+#   tv-vol set N          直接设成 N（0~100，内部换算成加/减若干格）
+#   tv-vol N              set N 的简写
+#   tv-vol mute|unmute|toggle
+#
+# 环境变量: TCL_TV_ADDR / ADB / TCL_VOL_MAX（默认 100，对应 ro.config.media_vol_steps）
+set -uo pipefail
+
+TV="${TCL_TV_ADDR:-192.168.144.188:5555}"
+TV_DIR="$HOME/apps/tv"
+LOG="$TV_DIR/tv-vol.log"
+MAX_VOL="${TCL_VOL_MAX:-100}"
+
+# adb：与 tv-cast / tv-on.sh / tv-off.sh 同一套解析顺序
+if [ -z "${ADB:-}" ]; then
+  ADB="$(command -v adb 2>/dev/null || true)"
+  for c in "$HOME/apps/android-studio/android/sdk/platform-tools/adb" \
+           "$HOME/apps/Android/Sdk/platform-tools/adb" \
+           "$HOME/Android/Sdk/platform-tools/adb" "$TV_DIR/adb"; do
+    [ -n "$ADB" ] && break
+    [ -x "$c" ] && ADB="$c"
+  done
+  ADB="${ADB:-adb}"
+fi
+
+log()  { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null; }
+die()  { echo "tv-vol: $*" >&2; exit 1; }
+adb_tv() { "$ADB" -s "$TV" "$@"; }
+
+ensure_adb() {
+  [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
+  "$ADB" connect "$TV" >/dev/null 2>&1
+  [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
+  die "连不上电视（$TV）。电视在待机？先跑 tv-on.sh 把它点亮。"
+}
+
+# 一次性读出 STREAM_MUSIC 的 音量 / 输出设备 / 静音状态（也就是音量条显示的那套值）
+# 输出: "<音量> <设备> <muted>"
+read_state() {
+  ensure_adb
+  adb_tv shell dumpsys audio 2>/dev/null | tr -d '\r' | awk '
+    /^- STREAM_MUSIC:/ { f=1; next }
+    f && /^- STREAM_/  { exit }
+    f && /streamVolume:/ { v=$0; sub(/.*streamVolume:/, "", v) }
+    f && /Muted:/ && m == "" { m=$2 }
+    f && /Devices:/ { d=$2 }
+    END { print v, d, m }'
+}
+
+json_vol() {  # 提取当前音量数字
+  set -- $(read_state)
+  printf '%s' "${1:-}"
+}
+
+warn_route() {  # 输出设备被劫持时给个显眼提示
+  local dev="${1:-}"
+  [ "$dev" = "remote_submix" ] || return 0
+  echo "⚠  输出设备是 remote_submix：电视音频正被 scrcpy 抓音劫持，此时音量键改的是抓音支路，" >&2
+  echo "   电视喇叭不受影响（连遥控器也会失效）。关掉 tv-mirror / 重跑 tv-on.sh 可恢复。" >&2
+}
+
+show_state() {
+  local v d m
+  set -- $(read_state)
+  v="${1:-}"; d="${2:-}"; m="${3:-}"
+  [ -n "$v" ] || die "读不到音量（dumpsys audio 没返回 STREAM_MUSIC），电视 framework 可能卡住了。"
+  printf '音量 %s/%s' "$v" "$MAX_VOL"
+  [ -n "$d" ] && printf '  输出: %s' "$d"
+  case "$m" in
+    true) printf '  静音: 是' ;;
+    false) printf '  静音: 否' ;;
+  esac
+  printf '\n'
+  warn_route "$d"
+}
+
+send_key_n() {  # 键码 次数 —— 循环发，留一点间隔避免被合并
+  local key="$1" n="$2"
+  ensure_adb
+  adb_tv shell "for i in \$(seq 1 $n); do input keyevent $key; sleep 0.1; done" >/dev/null 2>&1
+}
+
+step() {  # 加/减 n 格：$1=n（正数=加，负数=减）
+  local n="$1" key=24 count
+  [ "$n" -lt 0 ] && { key=25; n=$(( -n )); }
+  count="$n"
+  [ "$count" -gt 0 ] || return 0
+  log "keyevent $key x$count"
+  send_key_n "$key" "$count"
+}
+
+key_once() { ensure_adb; adb_tv shell "input keyevent $1" >/dev/null 2>&1; }
+
+cmd_up() {
+  local n="${1:-1}"
+  case "$n" in ''|*[!0-9]*) die "up 的次数要是数字" ;; esac
+  step "$n" || true
+}
+
+cmd_down() {
+  local n="${1:-1}"
+  case "$n" in ''|*[!0-9]*) die "down 的次数要是数字" ;; esac
+  step "-$n" || true
+}
+
+cmd_set() {
+  local target="$1" cur
+  case "$target" in ''|*[!0-9]*) die "音量要是 0~$MAX_VOL 的数字" ;; esac
+  [ "$target" -gt "$MAX_VOL" ] && target="$MAX_VOL"
+  cur="$(json_vol)"
+  [ -n "$cur" ] || die "读不到当前音量，无法计算差值。"
+  if [ "$target" -eq "$cur" ]; then
+    echo "音量已经是 $target"
+  else
+    step "$(( target - cur ))"
+  fi
+}
+
+cmd_mute() {
+  case "${1:-toggle}" in
+    on|mute|1)   key_once 164; log "mute on" ;;
+    off|unmute|0) key_once 164; log "mute off(切换)" ;;
+    toggle|'')   key_once 164; log "mute toggle" ;;
+    *) die "mute 只支持 on|off|toggle" ;;
+  esac
+}
+
+case "${1:-get}" in
+  get|status|current) show_state ;;
+  up|+|raise)         cmd_up "${2:-1}";   show_state ;;
+  down|-|lower)       cmd_down "${2:-1}"; show_state ;;
+  set)                [ -n "${2:-}" ] || die "用法: tv-vol set N"; cmd_set "$2"; show_state ;;
+  mute)               cmd_mute "${2:-toggle}"; show_state ;;
+  unmute)             key_once 164; log "unmute"; show_state ;;
+  toggle)             key_once 164; show_state ;;
+  ''|*[!0-9]*)        echo "usage: tv-vol [get|up [n]|down [n]|set N|N|mute|unmute|toggle]" >&2; exit 2 ;;
+  *)                  cmd_set "$1"; show_state ;;
+esac
