@@ -10,17 +10,18 @@
 | `tv-mode.sh` | 串流期间把本机屏幕临时切成 16:9（避免电视两侧黑边），结束恢复首选模式 |
 | `tv-show` | **把图片推到电视上全屏显示**（一张 / 多张幻灯片）。走电视自带的 DLNA 渲染器（`com.tcl.MultiScreenInteraction_TV`），不装 App、不用遥控器 |
 | `tv-play` | **在电视上播放本地视频**（电视自己解码，不镜像）。同一套 DLNA 渲染器 + HTTP `Range`，支持暂停/拖动/连播 |
-| `tv-view` | **在电脑上看电视画面**（adb 抓屏 → ffplay 窗口，约 1 帧/秒）。也能只截一张图；硬件解码的视频层抓不到（全黑），看界面/菜单/操作够用 |
+| `tv-view` | **在电脑上看电视画面**（adb 抓屏 → ffplay 窗口，约 1 帧/秒，不用装任何东西）。也能只截一张图；硬件解码的视频层抓不到（全黑），看界面/菜单/操作够用 |
+| `tv-mirror` | **流畅看/操作电视**（scrcpy 镜像，界面 11~30 帧/秒 + 鼠标键盘能直接操作电视，要先装 scrcpy）。跟 `tv-view` 是两套方案，2026-10-11 拆开 |
 | `tv_dlna.py` | `tv-show` / `tv-play` 共用的库（SSDP 发现、SOAP、DLNA HTTP 服务），不用手动跑 |
 
 ## 安装（两台机器同一份）
 
 ```bash
 mkdir -p ~/apps/tv ~/.local/bin
-cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show tv-play tv-view tv_dlna.py ~/apps/tv/
+cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show tv-play tv-view tv-mirror tv_dlna.py ~/apps/tv/
 chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh \
-         ~/apps/tv/tv-show ~/apps/tv/tv-play ~/apps/tv/tv-view
-for s in tv-cast tv-on.sh tv-off.sh tv-show tv-play tv-view; do   # 让脚本能直接敲（笔记本的 ~/.local/bin
+         ~/apps/tv/tv-show ~/apps/tv/tv-play ~/apps/tv/tv-view ~/apps/tv/tv-mirror
+for s in tv-cast tv-on.sh tv-off.sh tv-show tv-play tv-view tv-mirror; do  # 让脚本能直接敲（笔记本的 ~/.local/bin
   ln -sf ~/apps/tv/$s ~/.local/bin/$s                     #  是写在 ~/.zshenv 的 PATH 里的）
 done
 ```
@@ -49,12 +50,14 @@ tv-play --sub auto 电影.mkv   # 把字幕烧进画面再播（默认不烧；a
 tv-play --sub 字幕.srt 电影.mp4  # 指定外挂字幕文件
 tv-play -t chi 电影.mkv        # 只烧这条内嵌字幕流（给 ffprobe 序号或语言；不看外挂字幕）
 tv-play --sub auto --size 1280x720 -q 23 电影.mkv   # 烧字幕时顺带缩放 / 调质量
-tv-view                # 在电脑上开个小窗看**电视画面**（adb 抓屏，约 1 帧/秒；--full 全屏，-s 960x540 定大小）
+tv-view                # 在电脑上看**电视画面**（adb 抓屏，约 1 帧/秒；默认正常窗口）
 tv-view --time 30      # 看 30 秒自动关
 tv-view shot           # 只截一张电视画面 → ~/Pictures/tv-<时间>.png
-tv-view --scrcpy       # 用 scrcpy（台式机已装）：界面 11~30 帧/秒 + 鼠标键盘直接操作电视（视频层仍全黑）
-tv-view --scrcpy --audio          # 连电视声音一起抓（电视只有 aac/flac 编码器，默认 aac）
-tv-view --scrcpy --audio --audio-codec flac   # 换个音频编码器
+tv-view --mode popup   # 浮动居中看（-s 960x540 定窗口大小）；--mode full / --full 全屏
+tv-mirror              # **scrcpy 镜像**（台式机已装）：界面 11~30 帧/秒 + 鼠标键盘直接操作电视（视频层仍全黑）
+tv-mirror --mode popup # 浮动小窗镜像；--mode full / --full 全屏
+tv-mirror --audio      # 连电视声音一起抓（自动用 aac 编码器 + output 音频源）
+tv-mirror --audio --audio-codec flac   # 换个音频编码器
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
@@ -77,11 +80,14 @@ tv-view --scrcpy --audio --audio-codec flac   # 换个音频编码器
 `tv-view` 方向相反：**在电脑上看电视画面**（`adb exec-out screencap -p` 一帧帧抓 → 管道喂 `ffplay`）。
 约 1 帧/秒（画面越花越慢，画报屏保那种 1.7 MB 的帧只有 0.4 帧/秒），窗口比电视画面滞后 1~4 秒；
 硬件解码的视频层抓出来全黑（MT5879 的视频走 MTK MFE 硬件层），所以只能看界面/菜单，看不了片子本身。
-抓声音要加 `--audio`（电视端只有 aac/flac，scrcpy 默认的 opus 会直接挂，脚本已默认带 `--audio-codec=aac`）。
 
-想要流畅（界面 11~30 帧/秒）或者想**用鼠标键盘直接操作电视**就加 `--scrcpy`（台式机已装 5.0.1；笔记本 `sudo pacman -S scrcpy`）。scrcpy 的 1080p 视频层同样全黑，实测和 screencap 逐像素相同。
+`tv-mirror` 是另一套：**scrcpy 镜像**（台式机已装 5.0.1，笔记本 `sudo pacman -S scrcpy`），界面 11~30 帧/秒、
+还能用鼠标键盘**直接操作电视**；它的 1080p 视频层同样全黑（实测和 screencap 逐像素相同 RMSE=0）。
+要抓声音加 `--audio`（电视端只有 aac/flac，scrcpy 默认的 opus 会直接把 server 带崩，
+脚本已默认带 `--audio-codec=aac` + `--audio-source=output`）。
+两个命令 2026-10-11 拆开：`tv-view` 不用装东西但慢，`tv-mirror` 流畅但依赖 scrcpy。
 
-默认走截图流时必须用 `ffplay`（`mpv` 在管道 `image2pipe` 场景会冻在第一帧）；细节和踩坑见
+截图流必须用 `ffplay`（`mpv` 在管道 `image2pipe` 场景会冻在第一帧）；细节和踩坑见
 [TCL电视投屏.md](../TCL电视投屏.md) 的「在电脑上看电视画面」。
 
 常用环境变量：`TCL_SHOW_INTERVAL`（`tv-show` 默认间隔秒数，默认 15）、`TCL_TV_ADDR`（默认 `192.168.144.188:5555`）、`TCL_PC_NAME`（默认 `$(hostname)`，
@@ -98,9 +104,10 @@ tv-view --scrcpy --audio --audio-codec flac   # 换个音频编码器
 - **adb 可用**：两台机器统一在 `~/apps/android-studio/android/sdk/platform-tools/adb`
   （笔记本写在 `~/.zshenv` 的 PATH 里；脚本自己也有兜底查找顺序）。
 - 电视进「画报」屏保时脚本会先发 `KEYCODE_WAKEUP`，不用遥控器按返回键。
-- **`tv-view` 的窗口规则**：两台机器的 `~/.config/hypr/hyprland.lua` 里各有一条 `float-tv-view`
-  （`match = { class = "^(mpv|ffplay)$", title = "^电视画面$" }`，`float = true`）。
-  平铺布局会覆盖播放器请求的窗口尺寸，删了这条 `-s/--size` 就不生效（`--full` 不受影响）。
+- **`tv-view` / `tv-mirror` 的窗口规则**：两台机器的 `~/.config/hypr/hyprland.lua` 里各有一条 `float-tv-view`
+  （`match = { class = "^(mpv|ffplay|scrcpy)$", title = "^电视画面$" }`，`float = true`），
+  只匹配 `--mode popup`（窗口标题正好是「电视画面」）。两个命令默认都是 `--mode normal`（正常窗口/平铺），
+  `-s/--size` 只在 popup 下生效；`--full` 由播放器/scrcpy 自己全屏，不依赖这条规则。
 
 ## 遥控器关机后的远程开机（HDMI-CEC）
 

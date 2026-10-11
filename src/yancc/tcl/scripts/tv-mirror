@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""用 scrcpy 把 TCL 电视的**画面镜像**到本机窗口（流畅，鼠标键盘直接操作电视）。
+
+跟 tv-view 的分工（2026-10-11 拆成两个命令）:
+  tv-view    截图流（adb screencap → ffplay）：约 1 帧/秒，不用装任何东西，看菜单/界面/操作够用
+  tv-mirror  scrcpy 镜像：界面 11~30 帧/秒 + 鼠标键盘能操作电视，但要先装 scrcpy
+
+用法:
+  tv-mirror                正常窗口（默认，平铺布局）
+  tv-mirror --mode popup   浮动+居中的小窗（大小由 -s 决定）
+  tv-mirror --mode full    全屏（= --full）
+  tv-mirror --audio        连电视声音一起抓（自动用 aac 编码器 + output 音频源）
+  tv-mirror -s 1920x1080   画面最大尺寸（默认 1280x720，只缩小不放大）
+  tv-mirror --time 60      看 60 秒自动关（默认 0 = 一直看，关窗口/Ctrl-C 结束）
+  tv-mirror --addr 192.168.1.5:5555
+
+实测与坑（TCL mt5879 / Android 11，scrcpy 5.0.1，详见 ../TCL电视投屏.md）:
+  * 界面/菜单 11~30 帧/秒（画面在动才有帧）；**1080p 硬件解码的视频层照样全黑**（和 screencap
+    逐像素相同 RMSE=0），所以看正在播的片子还是没戏 —— 它的价值是「流畅看界面 + 操作电视」。
+  * 音频编码器：这台电视只有 aac/flac（没有 opus，而 scrcpy 默认 opus）→ 不显式指定会
+    `Could not create default audio encoder for opus` 把整个 server 带崩（视频一起断）。
+  * 音频源：scrcpy 默认的 playback 在这台电视上读回 0 字节（`Could not read audio: 0`），
+    实测 `--audio-source=output` 能采到（aac 48kHz 立体声、非静音）；代价是镜像时电视喇叭不出声。
+  * 电视端编码器偶尔整体卡死：客户端报 `Demuxer 'video': stream disabled due to connection error`
+    + `Device disconnected`。判定（别猜）:
+      adb -s 192.168.144.188:5555 shell 'timeout 12 screenrecord --time-limit 2 /sdcard/sr.mp4; echo rc=$?'
+      挂了 → rc=124 且 0 字节（正常 rc=0、~1 MB）；此时 screencap/dumpsys/input 都还正常。
+    修法: adb -s 192.168.144.188:5555 reboot（persist.adb.tcp.port=5555，重启后 adb 自动回来）。
+
+窗口形态靠**窗口标题**切换（popup 用「电视画面」命中 hyprland.lua 里的 float-tv-view 浮动规则，
+normal/full 换成不匹配的标题交给平铺布局/播放器全屏）。
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import tv_dlna as d                                    # noqa: E402
+
+TAG = "tv-mirror"
+TITLES = {"popup": "电视画面", "normal": "电视画面（平铺）", "full": "电视画面（全屏）"}
+
+
+def parse_size(text):
+    parts = str(text).lower().replace("x", " ").split()
+    if len(parts) != 2:
+        raise SystemExit("-s/--size 要写成 1280x720")
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        raise SystemExit("-s/--size 要写成 1280x720（数字）")
+
+
+def adb_of():
+    """拿 adb 并确保电视在线；连不上就先叫醒电视再试一次。"""
+    adb = d.find_adb()
+    if not adb:
+        raise SystemExit("没找到 adb（设 $ADB 或装 platform-tools）")
+    for attempt in (1, 2):
+        subprocess.run([adb, "connect", d.TV_ADDR], timeout=15,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        state = subprocess.run([adb, "-s", d.TV_ADDR, "get-state"], stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True).stdout.strip()
+        if state == "device":
+            return adb
+        if attempt == 1:
+            print("adb 连不上 %s，先叫醒电视（tv-on.sh）…" % d.TV_ADDR, file=sys.stderr, flush=True)
+            d.wake_tv(TAG)
+    raise SystemExit("adb 还是连不上电视（%s）：电视没开机？先 tv-on.sh / tv-cast on" % d.TV_ADDR)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="用 scrcpy 把 TCL 电视画面镜像到本机（流畅、可鼠标键盘操作电视）")
+    ap.add_argument("-s", "--size", default="1280x720", metavar="WxH",
+                    help="画面最大尺寸（默认 1280x720，只缩小不放大）")
+    ap.add_argument("--mode", choices=("popup", "normal", "full"), default=None,
+                    help="窗口形态：normal=正常窗口/平铺（默认）/ popup=浮动居中 / full=全屏")
+    ap.add_argument("--full", action="store_true", help="全屏（等于 --mode full）")
+    ap.add_argument("--time", type=int, default=0, metavar="秒",
+                    help="看这么多秒自动关（默认 0 = 一直看，关窗口/Ctrl-C 结束）")
+    ap.add_argument("--audio", action="store_true", help="连电视声音一起抓（自动 aac + output）")
+    ap.add_argument("--audio-codec", default="aac", metavar="CODEC",
+                    help="--audio 用的音频编码器（这台电视只有 aac/flac，默认 aac）")
+    ap.add_argument("--audio-source", default="output", metavar="SOURCE",
+                    help="--audio 的音频源（这台电视默认的 playback 采不到，实测 output 可以）")
+    ap.add_argument("--addr", default="", help="电视 adb 地址（默认 192.168.144.188:5555）")
+    a = ap.parse_args()
+    if a.addr:
+        d.TV_ADDR = a.addr
+        d.TV_HOST = a.addr.rsplit(":", 1)[0]
+    mode = a.mode or ("full" if a.full else "normal")
+
+    scrcpy = shutil.which("scrcpy")
+    if not scrcpy:
+        raise SystemExit("没装 scrcpy：sudo pacman -S scrcpy\n"
+                         "（不想装、只要能看界面：用 tv-view，截图流约 1 帧/秒）")
+    adb_of()
+    cmd = [scrcpy, "-s", d.TV_ADDR, "--window-title=%s" % TITLES[mode],
+           "--max-size=%d" % max(parse_size(a.size)), "--no-audio"]
+    if a.audio:
+        cmd.remove("--no-audio")
+        cmd.append("--audio-codec=%s" % a.audio_codec)     # 默认 opus 会直接崩（见文件头）
+        cmd.append("--audio-source=%s" % a.audio_source)   # 默认 playback 采不到（见文件头）
+    if a.time:
+        cmd.append("--time-limit=%d" % a.time)
+    if mode == "full":
+        cmd.append("--fullscreen")
+    print("scrcpy 镜像中（鼠标键盘能直接操作电视；截图流那份用 tv-view），"
+          "%s结束" % ("%d 秒后自动" % a.time if a.time else "关窗口/Ctrl-C "))
+    # 自己收 Ctrl-C 并把 scrcpy 子进程收干净：用 subprocess.run 时被 SIGTERM 打断会留下
+    # 一个没有父进程的 scrcpy（实测残留过一个，电视上还挂着窗口 + adb reverse）
+    p = subprocess.Popen(cmd)
+    try:
+        code = p.wait()
+    except KeyboardInterrupt:
+        p.terminate()
+        try:
+            code = p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            code = p.wait()
+        return 130
+    if code and a.audio:
+        print("要是上面报音频编码器错：这台电视只有 aac/flac，试试 --audio-codec=flac；"
+              "要是报 `Could not read audio: 0`：换 --audio-source=output（默认）或 mic；"
+              "编码器列表用 `scrcpy --list-encoders` 看", file=sys.stderr)
+    if code:
+        print("要是 Video 报 `stream disabled due to connection error`：多半是电视端编码器卡死了，"
+              "先按文件头那两条命令判定，再 adb reboot 电视", file=sys.stderr)
+        print("要是报 `No service published for: input`，或者 adb shell 卡住不回：电视的 system_server "
+              "挂了（`service list` 从 ~196 项掉到几十项），这时 adb reboot 也发不进去 →\n"
+              "  用树莓派 CEC 急救（待机 + 唤醒，等价于遥控器关机再开）：\n"
+              "  ssh yancc@192.168.144.229 \"cec-ctl -d0 --playback -t 0 --standby; sleep 5; "
+              "cec-ctl -d0 --playback -t 0 --image-view-on\"", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

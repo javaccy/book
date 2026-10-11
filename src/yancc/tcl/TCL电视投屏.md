@@ -343,15 +343,20 @@ tv-play -t 3 --size 1280x720 -q 23 电影.mkv   # 烧字幕时顺带缩放 + 调
 
 ## 在电脑上看电视画面（adb 抓屏，2026-10-11）
 
-**结论：能用，但是幻灯片，不是流畅视频。** 脚本：**`tv-view`**（`~/apps/tv/`，python3）。
+**结论：能用，但是幻灯片，不是流畅视频。** 两个脚本（都在 `~/apps/tv/`，python3）：
+
+- **`tv-view`** = 截图流：约 1 帧/秒，不用装任何东西，看菜单/界面/操作够用。
+- **`tv-mirror`** = scrcpy 镜像：界面 11~30 帧/秒 + **能用鼠标键盘直接操作电视**，要先装 scrcpy。
+  （2026-10-11 把原来的 `tv-view --scrcpy` 拆出来成了独立命令；`tv-view --scrcpy` 现在会提示用 `tv-mirror`。）
 
 ```bash
-tv-view                    # 开个浮动小窗看电视画面（约 1 帧/秒）
+tv-view                    # 正常窗口看电视画面（约 1 帧/秒）
 tv-view --time 30          # 看 30 秒自动退出
+tv-view --mode popup       # 浮动居中看（-s 1280x720 决定大小）
 tv-view --full             # 全屏
-tv-view -s 1280x720        # 窗口大小（需要下面的 Hyprland 规则配合）
 tv-view shot [文件]        # 只截一张图（默认 ~/Pictures/tv-<时间>.png）
-tv-view --scrcpy           # 用 scrcpy（要先装）：界面 11~30 帧/秒，还能鼠标键盘直接操作电视
+tv-mirror                  # scrcpy 镜像（要先装）：11~30 帧/秒，鼠标键盘直接操作电视
+tv-mirror --audio          # 连声音一起抓（自动 aac + output 源）
 ```
 
 原理：`adb exec-out screencap -p` 一帧帧抓，塞进 `ffplay` 当图像流播（`-f image2pipe`）。
@@ -375,7 +380,7 @@ tv-view --scrcpy           # 用 scrcpy（要先装）：界面 11~30 帧/秒，
   `screencap -p` 直接 `rc=1` + 0 字节，logcat 里是
   `W SurfaceFlinger: FB is protected: PERMISSION_DENIED` + `E SurfaceFlinger: captureScreen failed to readInt32: -1`。
   （不是电视睡着了；`dumpsys power` 还是 `Awake`/`Display state=ON`。）**同一时刻 scrcpy 照常能抓**
-  （它走 SurfaceControl，1 MB/4 秒的录像里画面是正常内容），所以碰到这种情况就用 `--scrcpy`。
+  （它走 SurfaceControl，1 MB/4 秒的录像里画面是正常内容），所以碰到这种情况就换 `tv-mirror`。
   `tv-view` 的 live/shot 失败提示里已经写上这条了。
 
 ### 实现踩坑（都在脚本里绕过了）
@@ -392,37 +397,38 @@ tv-view --scrcpy           # 用 scrcpy（要先装）：界面 11~30 帧/秒，
    ```lua
    hl.window_rule({
        name  = "float-tv-view",
-       match = { class = "^(mpv|ffplay)$", title = "^电视画面$" },
+       match = { class = "^(mpv|ffplay|scrcpy)$", title = "^电视画面$" },
        float = true, center = true, no_anim = true,
    })
    ```
 
-   注意这条**只匹配标题正好是 `电视画面` 的窗口**，也就是 `--mode popup`（默认）。
+   注意这条**只匹配标题正好是 `电视画面` 的窗口**，也就是 `--mode popup`。
 
 ### 窗口形态：`--mode popup|normal|full`（2026-10-11 实测）
 
-三种形态靠**窗口标题**切换：只有 popup 的标题是 `电视画面`（命中上面那条浮动规则，实际配置里
-class 已经把 scrcpy 也加进去了：`^(mpv|ffplay|scrcpy)$`），另外两种换成不匹配的标题
-（`电视画面（平铺）` / `电视画面（全屏）`），于是走平铺布局 / 播放器自己的全屏：
+`tv-view` 和 `tv-mirror` 都有这套开关，**默认 `normal`（正常窗口 / 平铺布局）**。
+三种形态靠**窗口标题**切换：只有 popup 的标题是 `电视画面`（命中上面那条浮动规则），
+另外两种换成不匹配的标题（`电视画面（平铺）` / `电视画面（全屏）`），于是走平铺布局 / 播放器自己的全屏：
 
 ```bash
-tv-view --scrcpy                 # popup（默认）：浮动+居中，-s 决定大小 ✅ 实测 floating=True, 1280x720
-tv-view --scrcpy --mode normal   # 平铺：占满工作区，能和别的窗口分屏 ✅ 实测 floating=False, 1872x1392
-tv-view --scrcpy --mode full     # 真全屏（scrcpy --fullscreen / ffplay -fs）✅ 实测 fullscreen=2, 3440x1440
-tv-view --scrcpy --full          # --full 是 --mode full 的老写法，保留
+tv-mirror                        # normal（默认）：正常窗口/平铺，能和别的窗口分屏
+                                 #   ✅ 实测 floating=False, 1872x1392（scrcpy；tv-view 的 ffplay 同理）
+tv-mirror --mode popup           # 浮动+居中，-s 决定大小 ✅ 实测 floating=True, 1280x720
+tv-mirror --mode full            # 真全屏（scrcpy --fullscreen / ffplay -fs）✅ 实测 fullscreen=2, 3440x1440
+tv-mirror --full                 # --full 是 --mode full 的简写
 ```
 
-- `--mode normal` / `full` 下 `-s/--size` 不再起作用（大小交给窗口管理器/全屏），属正常。
-- 想换默认形态：改脚本里 `--mode` 的默认值，或自己包一层 alias。
+- `normal` / `full` 下 `-s/--size` 不再起作用（大小交给窗口管理器/全屏），属正常。
 - 三种形态实测都走同一份 scrcpy 命令，只有标题和 `--fullscreen` 不同，画面/操作不受影响。
 
-### scrcpy（`--scrcpy`，想要流畅/想操作电视就用它）
+### scrcpy 镜像：`tv-mirror`（想要流畅/想操作电视就用它）
 
 台式机已经装好（`scrcpy 5.0.1` + `android-tools`，依赖 `sdl3`/`ffmpeg` 本来就有）：
 
 ```bash
-tv-view --scrcpy            # 界面 11~30 帧/秒，鼠标键盘直接操作电视
-tv-view --scrcpy --audio    # 连声音一起抓（实测能出声音，见下）
+tv-mirror            # 界面 11~30 帧/秒，鼠标键盘直接操作电视
+tv-mirror --audio    # 连声音一起抓（实测能出声音，见下）
+tv-mirror --mode popup   # 换成浮动小窗；--mode full / --full 全屏
 ```
 
 - 实测：server 733 KB 能推到电视（`49 MB/s`），电视端 `SurfaceControl` 抓屏、`OMX.MS.AVC.Encoder` 编码，
@@ -433,11 +439,11 @@ tv-view --scrcpy --audio    # 连声音一起抓（实测能出声音，见下�
 - **抓声音必须指定 aac**：这台电视的音频编码器只有 aac/flac（`scrcpy --list-encoders` 实测），
   而 scrcpy 的默认是 opus → 不加 `--audio-codec=aac` 会直接
   `Could not create default audio encoder for opus` 挂掉（整个 server 线程死掉，连视频一起断）。
-  `tv-view --scrcpy --audio` 已经自动带上 aac（想换用 `--audio-codec flac`）。
+  `tv-mirror --audio` 已经自动带上 aac（想换用 `--audio-codec flac`）。
 - **音频源默认的 `playback` 也采不到**（2026-10-11 实测）：server 端
   `Could not read audio: 0`（AudioRecord 读回 0 字节）→ 录出来只有视频没有音轨。
   换 **`--audio-source=output`** 就正常了：录出 aac 48000 Hz 立体声、`volumedetect` 显示
-  mean -36.9 dB / max -24.3 dB（真声音，不是静音）。`tv-view` 的 `--audio` 现在默认就用 output；
+  mean -36.9 dB / max -24.3 dB（真声音，不是静音）。`tv-mirror --audio` 默认就用 output；
   代价是 scrcpy 文档说的「disables playback on the device」——镜像期间电视自己的喇叭不出声。
   （`--audio-source=mic` 也能出音轨，走电视麦克风录环境音。）
 
@@ -468,6 +474,29 @@ tv-view --scrcpy --audio    # 连声音一起抓（实测能出声音，见下�
 
 注意它跟「抓不到视频层」是两码事：前者是软件卡死、重启就好；后者（1080p 全黑）是 MTK MFE
 硬件视频层不走 GPU 合成的硬限制，重启也抓不到。
+
+### 电视的 system_server 也会挂（2026-10-11 同日又踩到，比上面更狠）
+
+在上面那次「编码器卡死」之后继续折腾（scrcpy 反复跑 + 电视自己在放短视频），电视的 **framework
+整体挂了**，症状和修法都不一样：
+
+- scrcpy 报 `[server] ERROR: android.os.ServiceManager$ServiceNotFoundException: No service published
+  for: input` → `Server connection failed`。
+- **`adb` 还连着（`get-state` 还是 `device`），但 `adb shell` 全部卡住不回**：连
+  `getprop sys.boot_completed`、`service list` 都吐不出东西，`adb reboot` 也发不进去（超时）。
+- 判定：能连上时 `service list | wc -l` 从正常的 **~196 项掉到 ~48 项**（`input:`/`window:`/
+  `activity:` 都没了），`load average` 50+（`system_server` 进程还在，但服务注册表已经空了）。
+- **修法不是 `adb reboot`（发不进去），而是用树莓派发 HDMI-CEC 待机再唤醒**，等价于遥控器关机再开：
+
+  ```bash
+  ssh yancc@192.168.144.229 "cec-ctl -d0 --playback -t 0 --standby; sleep 5; cec-ctl -d0 --playback -t 0 --image-view-on"
+  # 可以先用这条确认电视真的进了待机（会回 REPORT_POWER_STATUS: pwr-state: standby）：
+  # ssh yancc@192.168.144.229 'cec-ctl -d0 --playback -t 0 --give-device-power-status'
+  ```
+
+  实测：发完 standby 后电视立刻断网（`No route to host`），约 10 秒后 adb 自己回来，
+  `service list` 恢复 196 项、`screencap` rc=0、scrcpy 正常 —— **不用重启整机（uptime 没归零）**，
+  属于「待机→唤醒」把 framework 拉起来了。
 
 ### 其它
 
