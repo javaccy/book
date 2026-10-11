@@ -131,3 +131,25 @@ SimpleSSHD **没有固定密码**：没找到 authorized_keys 时，每次有人
 6. 最终定位：`TclPackageManagerService.verifyOverseasApp` → `OverseasAppConfig.verify`（不拦截）→ 真凶是 `isVerificationEnabled` 的 TCL 分支 + packageinstaller 的策略链
 
 分析时拉的固件文件和解包文本当时在 `/tmp/tclfw/`（临时目录，重启即失，需要就重做）。
+
+## TiViMate 安装记录（2026-10-11）
+
+```bash
+# 官网 APK（tivimate.com/apk 会 302 到 files.tivimate.com，是官方的文件服务器）
+export https_proxy=http://192.168.144.2:9118   # 直连不通，要过代理
+curl -L https://tivimate.com/apk -o tivimate.apk    # 本次 5.3.3，21 MB
+
+adb -s 192.168.144.188:5555 push tivimate.apk /data/local/tmp/tivimate-5.3.3.apk
+adb -s 192.168.144.188:5555 shell pm install -r /data/local/tmp/tivimate-5.3.3.apk
+# Success（一次就过）
+```
+
+- 包名 `ar.tvplayer.tv`，签名 `CN=Alexey Rabets, L=Minsk, C=BY`（Armobsoft FZE），
+  本次装的 5.3.3（versionCode 1000005332，minSdk 23 / targetSdk 34，含 `armeabi-v7a`，电视是 armeabi-v7a）。
+- **这次没触发安装拦截**：装之前 `content query --uri content://com.tcl.providers.config/InstallConfig`
+  回 `No result found`，也就是云控的 `InstallConfig` 当时没下发（和上面「配置会被云端重新推送、删掉就好」对得上）。
+  以后哪天又报 `INSTALL_FAILED_VERIFICATION_FAILURE`，照本文开头的 `content delete` 走一遍即可。
+- `monkey -p ar.tvplayer.tv -c android.intent.category.LAUNCHER 1` 能正常拉起来，
+  首屏是 Terms of Use（要遥控器点「接受」）。**用户协议我没有代点**。
+- ⚠️ 这台电视**没有 GMS / Google Play**（`pm list packages` 里没有 `com.android.vending`）。
+  TiViMate 的高级版解锁走 Google Play 内购，所以在这台电视上没法购/解锁；免费档功能可用。
