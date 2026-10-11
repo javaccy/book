@@ -92,10 +92,14 @@ show_state() {
   warn_route "$d"
 }
 
-send_key_n() {  # 键码 次数 —— 循环发，留一点间隔避免被合并
-  local key="$1" n="$2"
+send_key_n() {  # 键码 次数 —— 一次 `input keyevent` 带上 N 个键码
+  # 电视端 `input` 每次调用要 ~1.1 秒（都要起一个 app_process），所以必须批量：
+  # 实测 5 个键码一次发 1.3 秒，循环发要 5.6 秒。
+  local key="$1" n="$2" args="" i=0
+  [ "$n" -gt 0 ] || return 0
+  while [ "$i" -lt "$n" ]; do args="$args $key"; i=$((i + 1)); done
   ensure_adb
-  adb_tv shell "for i in \$(seq 1 $n); do input keyevent $key; sleep 0.1; done" >/dev/null 2>&1
+  adb_tv shell input keyevent $args >/dev/null 2>&1
 }
 
 step() {  # 加/减 n 格：$1=n（正数=加，负数=减）

@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# 交互式远程调电视音量 —— 键位照 alsamixer 抄：
+#
+#   ↑ / ↓ / + / - / k / j   音量 ±1
+#   PgUp / PgDn             ±5
+#   Home / End              最小 / 最大
+#   m                       静音切换
+#   r                       从电视重新读取
+#   q / Esc / Ctrl-C        退出
+#
+# 底层还是 tv-vol 那套 `input keyevent 24/25/164`。原理，以及「tv-mirror --audio
+# 抓音会劫持音频路由、导致音量键（含实体遥控器）整体失效」这个坑，见 tv-vol 头部注释。
+#
+# 为什么要有「连按合并」：电视端 `input` 每次调用要 ~1.1 秒（每次都要起一个
+# app_process），一次一按会明显卡手。所以界面先乐观显示（立刻响应），手停下来
+# 才把「目标值 − 电视实际值」一次性发过去，再回读电视真实值对齐。
+#
+# 环境变量: TCL_TV_ADDR / ADB / TCL_VOL_MAX（默认 100）
+#           TCL_ALSA_STEP（±1 步长，默认 1）/ TCL_ALSA_BIG（翻页步长，默认 5）
+#           TCL_ALSA_IDLE（空闲多少秒回读一次电视，默认 2）
+set -uo pipefail
+
+TV="${TCL_TV_ADDR:-192.168.144.188:5555}"
+TV_DIR="$HOME/apps/tv"
+MAX_VOL="${TCL_VOL_MAX:-100}"
+STEP="${TCL_ALSA_STEP:-1}"
+BIG="${TCL_ALSA_BIG:-5}"
+IDLE="${TCL_ALSA_IDLE:-2}"
+BAR=50
+
+# adb：与 tv-cast / tv-on.sh / tv-vol 同一套解析顺序
+if [ -z "${ADB:-}" ]; then
+  ADB="$(command -v adb 2>/dev/null || true)"
+  for c in "$HOME/apps/android-studio/android/sdk/platform-tools/adb" \
+           "$HOME/apps/Android/Sdk/platform-tools/adb" \
+           "$HOME/Android/Sdk/platform-tools/adb" "$TV_DIR/adb"; do
+    [ -n "$ADB" ] && break
+    [ -x "$c" ] && ADB="$c"
+  done
+  ADB="${ADB:-adb}"
+fi
+
+# 电视端一条命令里干完活：先发键，再只取 STREAM_MUSIC 那几行（别把整个 dumpsys 拉回来）
+DEV_READ="dumpsys audio | sed -n '/^- STREAM_MUSIC:/,/^- STREAM_/p' | grep -E 'streamVolume:|Devices:|Muted:'"
+
+dev_vol=""; dev_device=""; dev_muted=""
+target=""
+pending=""
+
+die() { printf 'tv-alsamixer: %s\n' "$*" >&2; exit 1; }
+# ⚠️ `</dev/null` 必须有：`adb shell` 会把本地 stdin 转发给远端，交互模式下会把
+#    用户接下来敲的键（比如 r / q）吞掉，表现为「连按时后面的键丢了」。
+adb_tv() { "$ADB" -s "$TV" "$@" </dev/null; }
+
+ensure_adb() {
+  [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
+  "$ADB" connect "$TV" >/dev/null 2>&1
+  [ "$(adb_tv get-state 2>/dev/null)" = "device" ] && return 0
+  die "连不上电视（$TV）。电视在待机？先跑 tv-on.sh 把它点亮。"
+}
+
+parse_state() {  # stdin=那三行 → 输出 "音量 设备 muted"
+  tr -d '\r' | awk '
+    /streamVolume:/ { v=$0; sub(/.*streamVolume:/, "", v); sub(/[^0-9].*/, "", v) }
+    /Devices:/      { d=$2 }
+    /^ *Muted:/     { m=$2 }
+    END { print v, d, m }'
+}
+
+apply_state() {  # $1="音量 设备 muted"
+  set -- $1
+  dev_vol="${1:-}"; dev_device="${2:-}"; dev_muted="${3:-}"
+}
+
+dev_read() { ensure_adb; adb_tv shell "$DEV_READ" 2>/dev/null; }
+dev_keys() { ensure_adb; adb_tv shell "input keyevent $1; $DEV_READ" 2>/dev/null; }
+
+refresh() {
+  apply_state "$(dev_read | parse_state)"
+  [ -n "$dev_vol" ] || die "读不到音量（dumpsys audio 没返回 STREAM_MUSIC），电视 framework 可能卡住了。"
+  target="$dev_vol"
+}
+
+flush() {  # 把 target 和电视实际值的差值一次性发过去，再回读真实值
+  [ -n "$dev_vol" ] || return 0
+  local delta=$(( target - dev_vol ))
+  [ "$delta" -ne 0 ] || return 0
+  local key=24 n=$delta args="" i=0
+  [ "$delta" -lt 0 ] && { key=25; n=$(( -delta )); }
+  while [ "$i" -lt "$n" ]; do args="$args $key"; i=$((i + 1)); done
+  apply_state "$(dev_keys "$args" | parse_state)"
+  [ -n "$dev_vol" ] && target="$dev_vol"
+}
+
+bump() {  # $1=增量（可负）
+  target=$(( target + $1 ))
+  [ "$target" -gt "$MAX_VOL" ] && target="$MAX_VOL"
+  [ "$target" -lt 0 ] && target=0
+}
+
+toggle_mute() {
+  apply_state "$(dev_keys 164 | parse_state)"
+}
+
+bar_for() {  # $1=音量 → 50 格的条
+  local filled=$(( $1 * BAR / MAX_VOL ))
+  [ "$filled" -gt "$BAR" ] && filled="$BAR"
+  [ "$filled" -lt 0 ] && filled=0
+  printf '%s%s' "$(printf '%*s' "$filled" '' | tr ' ' '#')" "$(printf '%*s' "$(( BAR - filled ))" '' | tr ' ' '-')"
+}
+
+# 只有内容真的变了才整屏重画（否则每 IDLE 秒回读一次就会闪一下）
+drawn=""
+draw() {
+  local mute_tag="" warn="" text
+  [ "$dev_muted" = "true" ] && mute_tag="   [已静音]"
+  [ "$dev_device" = "remote_submix" ] && warn="⚠ 输出设备被 scrcpy 抓音劫持（remote_submix），此时音量键改的是抓音支路，电视喇叭不受影响（遥控器也会失效）"
+  text="$(printf ' 电视音量   %s\n\n  Master   [%s]  %3s/%s%s\n\n  ↑↓ 或 +- 音量 ±%s      PgUp/PgDn ±%s      Home/End 最小/最大\n  m 静音切换   r 重新读取   q / Esc 退出\n' \
+    "$TV" "$(bar_for "$target")" "$target" "$MAX_VOL" "$mute_tag" "$STEP" "$BIG")"
+  [ -n "$warn" ] && text="$text
+ $warn"
+  [ "$text" = "$drawn" ] && return 0
+  drawn="$text"
+  printf '\033[H\033[J%s' "$text"
+}
+
+# 读一个「逻辑按键」，结果放全局 key_name：
+#   up/down/pageup/pagedown/home/end/mute/refresh/quit/none/other
+# $1 = 等待超时秒数
+#
+# ⚠️ 这里**故意不用命令替换**（早先写成 key="$(read_key …)"）：read 在子壳里，
+#    多读进来的字节会随子壳退出一起丢掉，连按/多键会丢键（实测 "mrq" 的 q 就没了）。
+key_name=""
+read_key() {
+  local c a b rest
+  key_name="other"
+  IFS= read -rsn1 -t "$1" c || { key_name="none"; return; }
+  case "$c" in
+    $'\e')
+      IFS= read -rsn1 -t 0.05 a || { key_name="quit"; return; }   # 光一个 Esc
+      [ "$a" = "[" ] || return 0
+      IFS= read -rsn1 -t 0.05 b || return 0
+      case "$b" in
+        A) key_name="up" ;;
+        B) key_name="down" ;;
+        5) IFS= read -rsn1 -t 0.05 rest || true; key_name="pageup" ;;
+        6) IFS= read -rsn1 -t 0.05 rest || true; key_name="pagedown" ;;
+        H) key_name="home" ;;
+        F) key_name="end" ;;
+        1) IFS= read -rsn1 -t 0.05 rest || true; key_name="home" ;;
+        4) IFS= read -rsn1 -t 0.05 rest || true; key_name="end" ;;
+      esac ;;
+    q|Q) key_name="quit" ;;
+    m|M) key_name="mute" ;;
+    r|R) key_name="refresh" ;;
+    +|=|k|K) key_name="up" ;;
+    -|_|j|J) key_name="down" ;;
+  esac
+}
+
+TTY_SAVED=""
+restore() {
+  [ -n "$TTY_SAVED" ] && stty "$TTY_SAVED" 2>/dev/null
+  printf '\033[?25h\033[0m\n'
+}
+
+main() {
+  [ -t 0 ] || die "需要交互终端（想在脚本里用就调 tv-vol）。"
+  [ -n "${TERM:-}" ] && [ "$TERM" != "dumb" ] || die "TERM=$TERM 不支持光标控制。"
+  refresh
+  TTY_SAVED="$(stty -g 2>/dev/null || true)"
+  trap restore EXIT INT TERM HUP
+  stty -icanon -echo -ixon 2>/dev/null || true
+  printf '\033[?25l'
+  local key next
+  while :; do
+    draw
+    if [ -n "$pending" ]; then key="$pending"; pending=""
+    else read_key "$IDLE"; key="$key_name"; fi
+    case "$key" in
+      up)       bump "$STEP" ;;
+      down)     bump "-$STEP" ;;
+      pageup)   bump "$BIG" ;;
+      pagedown) bump "-$BIG" ;;
+      home)     target=0 ;;
+      end)      target="$MAX_VOL" ;;
+      mute)     flush; toggle_mute ;;
+      refresh)  flush; refresh ;;
+      quit)     flush; break ;;
+      none)     refresh ;;   # 空闲 IDLE 秒 → 从电视回读一次（遥控器改过也能同步）
+      *)        ;;
+    esac
+    # 连按合并：再等 0.25 秒，没有后续按键就把差值一次性发过去
+    if [ "$key" != "none" ]; then
+      read_key 0.25; next="$key_name"
+      if [ "$next" != "none" ]; then pending="$next"; else flush; fi
+    fi
+  done
+}
+
+case "${1:-}" in
+  -h|--help)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+  '') main ;;
+  *)  die "tv-alsamixer 是交互式的，不接受参数（要一条命令改音量用 tv-vol up/down/set N）。" ;;
+esac

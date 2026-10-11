@@ -551,6 +551,26 @@ tv-vol set 20     # 绝对设值；tv-vol 20 是简写（范围 0~100，= ro.con
 tv-vol mute | unmute | toggle
 ```
 
+### 交互式：`tv-alsamixer`（2026-10-11）
+
+想跟手连着调就用它，键位照 alsamixer 抄（是个全屏 TUI）：
+
+```bash
+tv-alsamixer          # ↑↓ 或 +- 音量 ±1 / PgUp·PgDn ±5 / Home·End 最小·最大 / m 静音 / r 重读 / q·Esc 退出
+```
+
+底层还是 `tv-vol` 那套 `input keyevent`，两个实现上的坑（都是实测踩出来的）：
+
+- **电视端 `input` 每次调用要 ~1.1 秒**（每次都要起一个 app_process），一次一按会明显卡手。
+  所以界面先「乐观显示」立刻响应，手停下来（0.25 秒没有新按键）才把
+  「目标值 − 电视实际值」用**一次** `input keyevent 24 24 24 …` 批量发过去，再回读真实值对齐。
+  批量很关键：5 个键码一次发 1.3 秒，循环发要 5.6 秒（`tv-vol` 也改成批量了）。
+- **`adb shell` 会转发本地 stdin**：交互模式下会把用户接下来敲的键（`r`/`q`）吞掉，
+  表现为「连按时后面的键丢了」。所有 adb 调用都加了 `</dev/null`。
+  另一个坑是别把 `read` 写进命令替换里（`key="$(read_key …)"`）——子壳退出会丢掉多读的字节。
+- 静音要先 `flush` 再按静音键：**任何音量键都会顺带解除静音**，不然「先按音量再按 m」时
+  那次补发的音量键会把刚设好的静音顶掉。
+
 原理就是 `input keyevent KEYCODE_VOLUME_UP/DOWN/MUTE`。**这台电视用遥控器调音量本来就走的
 Android AudioService** —— 实测按一下遥控器音量加，`settings get system volume_music_speaker`
 就 +1，所以注入同样的按键 == 按遥控器。静音键（`KEYCODE_VOLUME_MUTE`，164）也真的会静音。

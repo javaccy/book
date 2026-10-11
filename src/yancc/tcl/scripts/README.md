@@ -14,16 +14,18 @@
 | `tv-view` | **在电脑上看电视画面**（adb 抓屏 → ffplay 窗口，约 1 帧/秒，不用装任何东西）。也能只截一张图；硬件解码的视频层抓不到（全黑），看界面/菜单/操作够用 |
 | `tv-mirror` | **流畅看/操作电视**（scrcpy 镜像，界面 11~30 帧/秒 + 鼠标键盘能直接操作电视，要先装 scrcpy）。跟 `tv-view` 是两套方案，2026-10-11 拆开 |
 | `tv-vol` | **远程控制电视音量**（加/减/设值/静音，等价按遥控器音量键；实测遥控器调音量走的就是 Android AudioService）。⚠️ 开着 `tv-mirror --audio` 时电视音量控制会整体失效（连实体遥控器都失效），要先关掉或重启电视 |
+| `tv-alsamixer` | **交互式调电视音量**（全屏界面，键位照 alsamixer：`↑↓` ±1、`PgUp/PgDn` ±5、`Home/End` 最小/最大、`m` 静音、`q`/`Esc` 退出）。底层还是 `tv-vol` 那套按键，只是做了连按合并，能连着按 |
 | `tv_dlna.py` | `tv-show` / `tv-text` / `tv-play` 共用的库（SSDP 发现、SOAP、DLNA HTTP 服务），不用手动跑 |
 
 ## 安装（两台机器同一份）
 
 ```bash
 mkdir -p ~/apps/tv ~/.local/bin
-cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show tv-text tv-play tv-view tv-mirror tv-vol tv_dlna.py ~/apps/tv/
+cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show tv-text tv-play tv-view tv-mirror tv-vol tv-alsamixer tv_dlna.py ~/apps/tv/
 chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh \
-         ~/apps/tv/tv-show ~/apps/tv/tv-text ~/apps/tv/tv-play ~/apps/tv/tv-view ~/apps/tv/tv-mirror ~/apps/tv/tv-vol
-for s in tv-cast tv-on.sh tv-off.sh tv-show tv-text tv-play tv-view tv-mirror tv-vol; do  # 让脚本能直接敲（笔记本的 ~/.local/bin
+         ~/apps/tv/tv-show ~/apps/tv/tv-text ~/apps/tv/tv-play ~/apps/tv/tv-view ~/apps/tv/tv-mirror \
+         ~/apps/tv/tv-vol ~/apps/tv/tv-alsamixer
+for s in tv-cast tv-on.sh tv-off.sh tv-show tv-text tv-play tv-view tv-mirror tv-vol tv-alsamixer; do  # 让脚本能直接敲（笔记本的 ~/.local/bin
   ln -sf ~/apps/tv/$s ~/.local/bin/$s                     #  是写在 ~/.zshenv 的 PATH 里的）
 done
 ```
@@ -70,6 +72,7 @@ tv-vol up 3            # 音量加 3 格（默认 1；范围 0~100）
 tv-vol down 3          # 音量减 3 格
 tv-vol set 20          # 绝对设值（内部换算成加/减若干格）；tv-vol 20 是简写
 tv-vol mute | unmute | toggle   # 静音 / 取消静音 / 切换
+tv-alsamixer           # 交互式调音量（键位照 alsamixer：↑↓ ±1 / PgUp·PgDn ±5 / Home·End / m 静音 / q 退出）
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
