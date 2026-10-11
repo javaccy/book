@@ -103,7 +103,13 @@ rm ~/.local/bin/sudo-askpass ~/.config/rofi/sudo-askpass.rasi
 - sudoers 里加 `NOPASSWD` 白名单命令 —— 免输入，但权限面更大。
 - `secret-tool` + keyring 缓存密码 —— 本机没跑 keyring 服务，行不通。
 
-## 相关：等主线程修好的 ffmpeg 坑
+## 相关：ffmpeg / GTK4 的坑（2026-10-11 已修）
 
-`IgnorePkg` 钉住 fontconfig/pango 这件事，主线程解钉后 GTK4 程序（zenity 等）
-会一并恢复；届时 askpass 也可以换回 `zenity --password`，但 rofi 版没必要换。
+`IgnorePkg` 钉住 fontconfig/pango 这件事已经在 2026-10-11 解钉并升级
+（`fontconfig 2.18.3` / `pango 1.58.2`，详见 [../archlinux.md](../archlinux.md) 的
+「ffmpeg 用不了：IgnorePkg 把 fontconfig 钉在 2.14 的坑」），实测：
+
+- `ffmpeg` 恢复正常（含 libass 字幕烧录、中文渲染）
+- `zenity --version` 也恢复正常了 → askpass 理论上可以换回 `zenity --password`
+- 但**保留 rofi 版**：rofi 的 `-mesg` 能写清"这是在要 sudo 密码"，
+  比 zenity 光秃秃一个输入框好认；而且不依赖 GTK4。

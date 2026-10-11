@@ -771,3 +771,26 @@ sudo pacman -U fontconfig-2.14.0-1-x86_64.pkg.tar.zst     # pango 同理: /packa
 **教训**：钉住的包会一直不动，但其他包继续往前跑，只要有人（libass 这种）按新 API 编译，加载时就会炸。
 以后要么别钉，要么定期（比如每次 `-Syu` 后）看一眼 `pacman -Qu` 有没有 `[ignored]`。
 
+### 修复结果（2026-10-11 已执行，实测通过）
+
+提权用的是 agent 那套 rofi askpass（见 [llm/agent-sudo.md](llm/agent-sudo.md)），
+一次 sudo 调用里合并执行了解钉 + 升级。升级后：
+
+| 检查项 | 结果 |
+|--------|------|
+| `pacman -Q fontconfig pango` | `2:2.18.3-2` / `1:1.58.2-1`（原来 2:2.14.0-1 / 1:1.56.4-2） |
+| `pacman -Qu` | 无 `[ignored]`，全部最新 |
+| `ffmpeg -version` | ✅ `n9.0.2` 正常打印 |
+| `ffmpeg ... -c:v libx264` | ✅ 编出 1280x720 H.264+AAC |
+| `ffmpeg -vf subtitles=xx.srt`（libass 字幕烧录） | ✅ 中文正常渲染（这条最吃 libass+fontconfig） |
+| `zenity --version` | ✅ `4.2.2`（之前 pango 太旧，GTK4 程序 `symbol lookup error`） |
+| `gst-inspect-1.0 avdec_h264` | ✅ 恢复 |
+
+**gst 的小尾巴**：插件缓存里还留着上次扫描失败的"黑名单"，光修库不够，要删掉注册表重建：
+
+```bash
+rm -rf ~/.cache/gstreamer-1.0 && gst-inspect-1.0 avdec_h264
+```
+
+`/etc/pacman.conf` 的备份在 `/etc/pacman.conf.bak-fontconfig-pin-20261011`，解钉那行也保留了原文注释。
+
