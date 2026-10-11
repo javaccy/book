@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""在 TCL 电视上全屏显示文字（本地渲染成 PNG，再走 tv-show 的 DLNA 推图链路）。
+
+用法:
+  tv-text "外卖到了"                 # 全屏大字（自动字号 / 自动换行 / 居中）
+  tv-text "第一行\n第二行"           # \n 换行
+  tv-text -s 120 "会议中"            # 指定字号（不给就自动撑满画面）
+  tv-text --fg '#ffcc00' --bg '#101010'
+  tv-text -i 20 "第一页" "第二页"     # 多个参数 = 幻灯片（每张 20 秒；默认 15 秒）
+  tv-text --no-loop "A" "B"          # 多页只放一遍，停在最后一页
+  tv-text off                        # 停止显示（= tv-show off）
+  tv-text --font /path/字体.otf      # 换字体（默认 fontconfig 找 Noto Sans CJK SC）
+
+实现与注意:
+  * 用 PIL 在本地画一张 1920x1080 的 PNG（电视原生分辨率），再调同目录的 tv-show 推过去 ——
+    复用已经跑通的 DLNA 渲染器 / CEC 唤醒 / 带 Range 的 HTTP 服务，不碰电视的输入和 App。
+  * 所以它**会抢占电视当前画面**（DLNA 渲染器和电视自己的视频/App 互斥），停下用 `tv-text off`。
+  * 生成的 PNG 留在 ~/Pictures/tv-text/（显示期间 tv-show 要一直能服务这个文件）；超过 7 天的
+    旧图会在下次运行时顺手删掉。
+  * 只认纯文字；图片/幻灯片用 tv-show，视频用 tv-play。
+
+参考: ~/IdeaProjects/book/src/yancc/tcl/TCL电视投屏.md
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import tv_dlna as d                                    # noqa: E402
+
+TAG = "tv-text"
+HERE = os.path.dirname(os.path.realpath(__file__))
+TV_SHOW = os.path.join(HERE, "tv-show")
+PIC_DIR = os.path.join(os.path.expanduser("~/Pictures"), "tv-text")
+KEEP_DAYS = 7
+
+NAMED = {"black": "#000000", "white": "#ffffff", "red": "#e02020", "green": "#28c828",
+         "blue": "#3070e0", "yellow": "#f0c000", "orange": "#f08000", "gray": "#808080",
+         "grey": "#808080", "dark": "#101010", "pink": "#f06aa0", "cyan": "#20c0c0"}
+# 这些字要能单独断行（中日韩 + 全角标点）；其余按「词」处理，英文/数字/路径不会被切碎
+BREAKABLE = ((0x1100, 0x115F), (0x2E80, 0xA4CF), (0xAC00, 0xD7A3), (0xF900, 0xFAFF),
+             (0xFE30, 0xFE4F), (0xFF00, 0xFF60), (0xFFE0, 0xFFE6), (0x20000, 0x3FFFD))
+# 行首禁则：这些标点不许出现在一行的开头（折行时把它们拽回上一行行尾，宁可那行稍微超一点）
+NO_LINE_START = "，。、；：！？）】》」』”’％…—·"
+
+
+def is_breakable(ch):
+    o = ord(ch)
+    return any(lo <= o <= hi for lo, hi in BREAKABLE)
+
+
+def parse_size(text):
+    parts = str(text).lower().replace("x", " ").split()
+    if len(parts) != 2:
+        raise SystemExit("--screen 要写成 1920x1080")
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        raise SystemExit("--screen 要写成 1920x1080（数字）")
+
+
+def parse_color(text, default):
+    s = (text or default).strip()
+    if s.startswith("#"):
+        hexs = s[1:]
+        if len(hexs) == 3:
+            hexs = "".join(c * 2 for c in hexs)
+        if len(hexs) == 6 and all(c in "0123456789abcdefABCDEF" for c in hexs):
+            return "#" + hexs.lower()
+    if s.lower() in NAMED:
+        return NAMED[s.lower()]
+    raise SystemExit("颜色不认：%s（用 #rrggbb 或 black/white/red/green/blue/yellow/gray）" % s)
+
+
+def find_font(explicit=""):
+    """中文字体：显式指定 > fontconfig 找常见几款 > None（调用方会警告并退回默认字体）。"""
+    if explicit:
+        p = os.path.expanduser(explicit)
+        if not os.path.exists(p):
+            raise SystemExit("字体会不到：%s" % explicit)
+        return p
+    if not shutil.which("fc-match"):
+        return None
+    for fam in ("Noto Sans CJK SC", "Noto Sans CJK SC Medium", "Source Han Sans SC",
+                "WenQuanYi Zen Hei", "Noto Sans"):
+        try:
+            out = subprocess.run(["fc-match", "-f", "%{file}", fam], stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        if out and os.path.exists(out):
+            return out
+    return None
+
+
+def tokenize(line):
+    """切成「不能拆开的最小单位」：中文一个字一个 token，英文/数字按词（空格单独一个 token）。"""
+    out, buf = [], ""
+    for ch in line:
+        if is_breakable(ch):
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.append(ch)
+        elif ch == " ":
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.append(" ")
+        else:
+            buf += ch
+    if buf:
+        out.append(buf)
+    return out
+
+
+def layout(text, font, max_w, draw):
+    """按 max_w 折行：中文逐字断、英文整词断，单个词超宽再按字符硬切。"""
+    lines = []
+    for para in str(text).split("\n"):
+        cur = ""
+        for tk in tokenize(para):
+            if tk == " " and not cur:
+                continue
+            if draw.textlength(cur + tk, font=font) <= max_w:
+                cur += tk
+                continue
+            if cur:
+                lines.append(cur.rstrip())
+                cur = ""
+                if tk == " ":
+                    continue
+                if draw.textlength(tk, font=font) <= max_w:
+                    cur = tk
+                    continue
+            rest = tk                                       # 这个 token 一行都放不下 → 硬切
+            while rest and draw.textlength(rest, font=font) > max_w:
+                i = 1
+                while i < len(rest) and draw.textlength(rest[:i + 1], font=font) <= max_w:
+                    i += 1
+                if i >= len(rest):
+                    break
+                lines.append(rest[:i])
+                rest = rest[i:]
+            cur = rest
+        lines.append(cur.rstrip())
+    return avoid_line_start(lines)
+
+
+def avoid_line_start(lines):
+    """中文避头：把下一行行首的禁则标点挪到上一行行尾（顺带丢掉被掏空的行）。"""
+    out = []
+    for ln in lines:
+        while ln and ln[0] in NO_LINE_START and out:
+            out[-1] += ln[0]
+            ln = ln[1:]
+        if ln or not out:
+            out.append(ln)
+    return out or [""]
+
+
+def load_font(font_path, size):
+    from PIL import ImageFont
+    return ImageFont.truetype(font_path, size) if font_path else ImageFont.load_default(size=size)
+
+
+def fit_font(text, font_path, box_w, box_h, draw, upper=320, lower=40, step=4):
+    """自动字号：从大到小试，第一个放得下的就用（长句子会一直缩到能塞进画面）。"""
+    lines, font = [""], load_font(font_path, lower)
+    for size in range(upper, lower - 1, -step):
+        font = load_font(font_path, size)
+        lines = layout(text, font, box_w, draw)
+        if len(lines) * int(size * 1.28) <= box_h:
+            return font, lines
+    return font, layout(text, font, box_w, draw)
+
+
+def render(text, path, args, font_path):
+    from PIL import Image, ImageDraw
+    W, H = args.screen
+    mx, my = int(W * 0.08), int(H * 0.08)                       # 8% 边距，别贴着屏幕边
+    draw = ImageDraw.Draw(Image.new("L", (8, 8)))                # 只用来量文字宽度
+    if args.size:
+        font = load_font(font_path, args.size)
+        lines = layout(text, font, W - 2 * mx, draw)
+    else:
+        font, lines = fit_font(text, font_path, W - 2 * mx, H - 2 * my, draw)
+    img = Image.new("RGB", (W, H), parse_color(args.bg, "#000000"))
+    canvas = ImageDraw.Draw(img)
+    line_h = int(font.size * 1.28)
+    y = (H - line_h * len(lines)) // 2 + int(font.size * 0.12)
+    for ln in lines:
+        canvas.text(((W - canvas.textlength(ln, font=font)) / 2, y), ln, font=font,
+                    fill=parse_color(args.fg, "#ffffff"))
+        y += line_h
+    img.save(path, "PNG", optimize=True)
+    return len(lines)
+
+
+def cleanup():
+    """顺手删掉超过 KEEP_DAYS 天的旧文字图（正在显示的那张一般不会放这么久）。"""
+    now = time.time()
+    try:
+        for f in os.listdir(PIC_DIR):
+            p = os.path.join(PIC_DIR, f)
+            if (f.startswith("tv-text-") and f.endswith(".png")
+                    and now - os.path.getmtime(p) > KEEP_DAYS * 86400):
+                os.unlink(p)
+                d.log(TAG, "清理旧文字图 %s" % f)
+    except OSError:
+        pass
+
+
+def main():
+    ap = argparse.ArgumentParser(description="在 TCL 电视上全屏显示文字")
+    ap.add_argument("text", nargs="*", help="要显示的文字；多个参数 = 多页幻灯片")
+    ap.add_argument("-s", "--size", type=int, default=0, metavar="像素",
+                    help="字号（默认 0 = 自动撑满画面）")
+    ap.add_argument("--fg", default="#ffffff", help="字色（默认 #ffffff）")
+    ap.add_argument("--bg", default="#000000", help="底色（默认 #000000）")
+    ap.add_argument("--font", default="", help="字体文件（默认 fontconfig 找 Noto Sans CJK SC）")
+    ap.add_argument("--screen", default="1920x1080", metavar="WxH",
+                    help="画面尺寸（默认电视原生 1920x1080）")
+    ap.add_argument("-i", "--interval", type=float, default=None, metavar="秒",
+                    help="多页时的间隔（默认交给 tv-show，15 秒）")
+    ap.add_argument("--no-loop", action="store_true", help="多页只放一遍，停在最后一页")
+    a = ap.parse_args()
+
+    if not a.text:
+        raise SystemExit('用法：tv-text "要显示的文字" ；停止显示用 tv-text off')
+    if a.text[0] == "off":
+        return subprocess.run([TV_SHOW, "off"]).returncode
+    a.screen = parse_size(a.screen)
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        raise SystemExit("没装 Pillow：sudo pacman -S python-pillow")
+
+    font_path = find_font(a.font)
+    if not font_path:
+        print("警告: 找不到中文字体（fc-match 没结果），中文会显示成方块 —— 用 --font 指定一个",
+              file=sys.stderr)
+
+    os.makedirs(PIC_DIR, exist_ok=True)
+    cleanup()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    texts = [t.replace("\\n", "\n") for t in a.text]
+    paths = []
+    for i, t in enumerate(texts):
+        if not t.strip():
+            raise SystemExit("第 %d 段是空的，没什么可显示" % (i + 1))
+        p = os.path.join(PIC_DIR, "tv-text-%s-%d.png" % (stamp, i + 1))
+        n = render(t, p, a, font_path)
+        print("已渲染 %s（%d 行，%.0f KB）" % (p, n, os.path.getsize(p) / 1024))
+        paths.append(p)
+
+    cmd = [TV_SHOW] + (["-i", str(a.interval)] if a.interval is not None else [])
+    cmd += (["--no-loop"] if a.no_loop else []) + paths
+    d.log(TAG, "推文字到电视: %s" % " / ".join(t.replace("\n", "⏎")[:30] for t in texts))
+    return subprocess.run(cmd).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

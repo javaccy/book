@@ -9,19 +9,20 @@
 | `tv-off.sh` | **把电视关到待机**（等于遥控器电源键）。串流中会先正常断开 + 恢复本机分辨率；adb 用不了（连不上 / shell 卡死）时自动走树莓派 CEC 待机兜底（这台电视认开机不认关机，兜底常失败） |
 | `tv-mode.sh` | 串流期间把本机屏幕临时切成 16:9（避免电视两侧黑边），结束恢复首选模式 |
 | `tv-show` | **把图片推到电视上全屏显示**（一张 / 多张幻灯片）。走电视自带的 DLNA 渲染器（`com.tcl.MultiScreenInteraction_TV`），不装 App、不用遥控器 |
+| `tv-text` | **把文字推到电视上全屏显示**（本地用 PIL 画成 1920x1080 的 PNG，再交给 `tv-show` 推）。自动字号/折行/居中，中文行首禁则也处理了 |
 | `tv-play` | **在电视上播放本地视频**（电视自己解码，不镜像）。同一套 DLNA 渲染器 + HTTP `Range`，支持暂停/拖动/连播 |
 | `tv-view` | **在电脑上看电视画面**（adb 抓屏 → ffplay 窗口，约 1 帧/秒，不用装任何东西）。也能只截一张图；硬件解码的视频层抓不到（全黑），看界面/菜单/操作够用 |
 | `tv-mirror` | **流畅看/操作电视**（scrcpy 镜像，界面 11~30 帧/秒 + 鼠标键盘能直接操作电视，要先装 scrcpy）。跟 `tv-view` 是两套方案，2026-10-11 拆开 |
-| `tv_dlna.py` | `tv-show` / `tv-play` 共用的库（SSDP 发现、SOAP、DLNA HTTP 服务），不用手动跑 |
+| `tv_dlna.py` | `tv-show` / `tv-text` / `tv-play` 共用的库（SSDP 发现、SOAP、DLNA HTTP 服务），不用手动跑 |
 
 ## 安装（两台机器同一份）
 
 ```bash
 mkdir -p ~/apps/tv ~/.local/bin
-cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show tv-play tv-view tv-mirror tv_dlna.py ~/apps/tv/
+cp tv-cast tv-on.sh tv-off.sh tv-mode.sh tv-show tv-text tv-play tv-view tv-mirror tv_dlna.py ~/apps/tv/
 chmod +x ~/apps/tv/tv-cast ~/apps/tv/tv-on.sh ~/apps/tv/tv-off.sh ~/apps/tv/tv-mode.sh \
-         ~/apps/tv/tv-show ~/apps/tv/tv-play ~/apps/tv/tv-view ~/apps/tv/tv-mirror
-for s in tv-cast tv-on.sh tv-off.sh tv-show tv-play tv-view tv-mirror; do  # 让脚本能直接敲（笔记本的 ~/.local/bin
+         ~/apps/tv/tv-show ~/apps/tv/tv-text ~/apps/tv/tv-play ~/apps/tv/tv-view ~/apps/tv/tv-mirror
+for s in tv-cast tv-on.sh tv-off.sh tv-show tv-text tv-play tv-view tv-mirror; do  # 让脚本能直接敲（笔记本的 ~/.local/bin
   ln -sf ~/apps/tv/$s ~/.local/bin/$s                     #  是写在 ~/.zshenv 的 PATH 里的）
 done
 ```
@@ -40,6 +41,11 @@ tv-show 图片或目录...  # 在电视上显示图片；多张=循环幻灯片�
 tv-show -i 30 图片...  # 幻灯片间隔 30 秒
 tv-show --no-loop 图片...  # 多张只放一遍，停在最后一张
 tv-show off           # 停止显示，电视回桌面
+tv-text "外卖到了"      # 在电视上全屏显示文字（本地渲染 PNG → 走 tv-show 那条链路）
+tv-text -s 120 "会议中"            # 指定字号（不给就自动撑满，最多 320px）
+tv-text --fg '#ffc000' --bg '#101010'   # 字色/底色
+tv-text "第一页" "第二页"           # 多段 = 幻灯片（-i 20 改间隔，--no-loop 只放一遍）
+tv-text off           # 停止显示（转 tv-show off）
 tv-play 视频或目录...   # 在电视上播视频；给多个文件/目录=连播，播完自动下一个
 tv-play pause|resume   # 暂停 / 继续（走 adb 遥控键，比 DMR 命令可靠）
 tv-play seek 12:30     # 拖到 12:30（也支持 +30 / -30 相对拖动）
@@ -69,6 +75,11 @@ tv-mirror --audio --audio-codec flac   # 换个音频编码器
 3 张幻灯片轮转正常；视频 5 秒起播，暂停/拖动/连播都通，两个脚本会互相抢渲染器（后启动的赢）。
 
 `tv-show` 和 `tv-play` 不能同时用（共用同一个渲染器）：谁后启动谁的守护进程会先把对方的杀掉。
+
+`tv-text` 是把文字画成图再交给 `tv-show`（所以要 Pillow + fontconfig 中文字体，两台机器都有），
+因此和 `tv-show`/`tv-play` 是同一套链路、同样会抢占电视画面。实测 `tv-text "外卖到了，门口柜子上放着"`
+5.9 秒上屏，电视自带照片查看器的「文件名 + 旋转按钮」浮层约 12 秒后自动淡出。生成的 PNG 存在
+`~/Pictures/tv-text/`（超过 7 天的旧图下次运行会顺手清掉）。
 
 `tv-play` 默认**原样推流、不转码**。要字幕得加 `--sub`：DLNA 这条链路没有字幕通道，只能本地用 ffmpeg
 把字幕烧进画面（重编码，实测 1080p 约 0.8x 实时）再推。转好的临时副本在 `~/.cache/tv-play/<pid>/`，
