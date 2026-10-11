@@ -709,3 +709,65 @@ mv ./opt/有道云笔记 ./ynote
 - pactl list short sinks - 查看所有音频输出
 - pactl set-default-sink <设备名> - 切换默认输出
 ```
+
+## ffmpeg 用不了：IgnorePkg 把 fontconfig 钉在 2.14 的坑（2026-10-11 诊断）
+
+**现象**：任何 ffmpeg 命令直接挂，连 `-version` 都不行：
+
+```
+ffmpeg: symbol lookup error: /usr/lib/libass.so.9: undefined symbol: FcConfigSetDefaultSubstitute
+```
+
+连带的：gstreamer 的 `libgstlibav.so` 插件加载失败（`gst-plugin-scanner` 一直报同一个错）、
+依赖 libass 的东西（字幕渲染）都不行。
+
+**根因**：`/etc/pacman.conf` 第 28 行有一行历史遗留的
+
+```
+IgnorePkg = fontconfig pango
+```
+
+于是 fontconfig 一直停在 **2:2.14.0-1**（`/usr/lib/libfontconfig.so.1.13.0` 的 mtime 还是 2022-04-02），
+但仓库里的 `libass 0.17.5-1` 是按新 fontconfig 编的，引用了两个 2.14 里不存在的符号：
+
+| 符号 | 引入版本 |
+|------|----------|
+| `FcConfigSetDefaultSubstitute` | fontconfig 2.16 |
+| `FcWeightToOpenTypeDouble` | fontconfig 2.15/2.16 |
+
+验证方法：
+
+```bash
+nm -D --undefined-only /usr/lib/libass.so.9.4.2 | grep FcConfigSetDefaultSubstitute  # 有 U → libass 要它
+nm -D --defined-only   /usr/lib/libfontconfig.so.1 | grep -c FcConfigSetDefaultSubstitute  # 0 → 系统没有
+pacman -Qu    # 只剩 fontconfig / pango 两个"过期"的，其它都最新 —— 就是被 IgnorePkg 钉的
+```
+
+**修复**（要 root）：
+
+```bash
+sudo cp -a /etc/pacman.conf /etc/pacman.conf.bak-fontconfig-pin
+sudo sed -i 's/^IgnorePkg *= *fontconfig pango/#（2026-10-11 解钉，见 archlinux.md）&/' /etc/pacman.conf
+sudo pacman -S --noconfirm fontconfig pango     # pango 是被一起钉的，升级要成对
+sudo fc-cache -f
+```
+
+**验证**：
+
+```bash
+ffmpeg -version | head -1
+ffmpeg -hide_banner -f lavfi -i testsrc2=size=640x480:rate=25 -t 3 -c:v libx264 -f null -   # 能转码就没问题
+gst-inspect-1.0 x264enc      # 顺带确认不再报 libgstlibav.so 加载失败
+```
+
+**回滚**（万一字体渲染观感有变；当前版本在本地 pacman 缓存里没有，要去归档拿）：
+
+```bash
+curl -O https://archive.archlinux.org/packages/f/fontconfig/fontconfig-2.14.0-1-x86_64.pkg.tar.zst
+sudo pacman -U fontconfig-2.14.0-1-x86_64.pkg.tar.zst     # pango 同理: /packages/p/pango/
+# 然后把 pacman.conf 里那行 IgnorePkg 改回原样（备份在 /etc/pacman.conf.bak-fontconfig-pin）
+```
+
+**教训**：钉住的包会一直不动，但其他包继续往前跑，只要有人（libass 这种）按新 API 编译，加载时就会炸。
+以后要么别钉，要么定期（比如每次 `-Syu` 后）看一眼 `pacman -Qu` 有没有 `[ignored]`。
+
