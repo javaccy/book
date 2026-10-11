@@ -53,6 +53,8 @@ tv-view                # 在电脑上开个小窗看**电视画面**（adb 抓�
 tv-view --time 30      # 看 30 秒自动关
 tv-view shot           # 只截一张电视画面 → ~/Pictures/tv-<时间>.png
 tv-view --scrcpy       # 用 scrcpy（台式机已装）：界面 11~30 帧/秒 + 鼠标键盘直接操作电视（视频层仍全黑）
+tv-view --scrcpy --audio          # 连电视声音一起抓（电视只有 aac/flac 编码器，默认 aac）
+tv-view --scrcpy --audio --audio-codec flac   # 换个音频编码器
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
@@ -75,6 +77,8 @@ tv-view --scrcpy       # 用 scrcpy（台式机已装）：界面 11~30 帧/秒 
 `tv-view` 方向相反：**在电脑上看电视画面**（`adb exec-out screencap -p` 一帧帧抓 → 管道喂 `ffplay`）。
 约 1 帧/秒（画面越花越慢，画报屏保那种 1.7 MB 的帧只有 0.4 帧/秒），窗口比电视画面滞后 1~4 秒；
 硬件解码的视频层抓出来全黑（MT5879 的视频走 MTK MFE 硬件层），所以只能看界面/菜单，看不了片子本身。
+抓声音要加 `--audio`（电视端只有 aac/flac，scrcpy 默认的 opus 会直接挂，脚本已默认带 `--audio-codec=aac`）。
+
 想要流畅（界面 11~30 帧/秒）或者想**用鼠标键盘直接操作电视**就加 `--scrcpy`（台式机已装 5.0.1；笔记本 `sudo pacman -S scrcpy`）。scrcpy 的 1080p 视频层同样全黑，实测和 screencap 逐像素相同。
 
 默认走截图流时必须用 `ffplay`（`mpv` 在管道 `image2pipe` 场景会冻在第一帧）；细节和踩坑见

@@ -9,6 +9,8 @@
   tv-view -s 1280x720      窗口大小（默认 1280x720）
   tv-view shot [文件]      截一张图（默认 ~/Pictures/tv-<时间>.png）
   tv-view --scrcpy         用 scrcpy（要先装），界面流畅(11~30fps)能鼠标键盘直接操作电视
+  tv-view --scrcpy --audio 连电视声音一起抓（这台电视只有 aac/flac 编码器，默认 aac；
+                           想换用 --audio-codec flac）
   tv-view --capture        强制用截图流（约 1 帧/秒）
   tv-view --addr 192.168.1.5:5555    换电视地址
 
@@ -132,10 +134,17 @@ def live_scrcpy(args):
            "--max-size=%d" % max(args.size), "--no-audio"]
     if args.audio:
         cmd.remove("--no-audio")
+        # 这台电视只有 aac/flac 两个音频编码器（没有 opus，而 scrcpy 默认就是 opus）
+        # → 不显式指定就会 "Could not create default audio encoder for opus" 直接挂掉
+        cmd.append("--audio-codec=%s" % args.audio_codec)
     if args.full:
         cmd.append("--fullscreen")
     print("scrcpy 看电视中（鼠标键盘能直接操作电视），关窗口结束")
-    return subprocess.run(cmd).returncode
+    code = subprocess.run(cmd).returncode
+    if code and args.audio:
+        print("要是上面报音频编码器错：这台电视只有 aac/flac，试试 --audio-codec=flac；"
+              "具体有哪些用 `scrcpy --list-encoders` 看", file=sys.stderr)
+    return code
 
 
 def live_capture(args):
@@ -213,6 +222,8 @@ def main():
     ap.add_argument("--time", type=int, default=0, metavar="秒",
                     help="只看这么多秒就退出（默认 0 = 一直看）")
     ap.add_argument("--audio", action="store_true", help="scrcpy 时连声音一起抓")
+    ap.add_argument("--audio-codec", default="aac", metavar="CODEC",
+                    help="--audio 用的音频编码器（这台电视只有 aac/flac，默认 aac）")
     ap.add_argument("--addr", default="", help="电视 adb 地址（默认 192.168.144.188:5555）")
     ap.add_argument("--scrcpy", action="store_true", help="用 scrcpy（要先装，能操作电视）")
     ap.add_argument("--capture", action="store_true", help="强制用截图流（约 1 帧/秒）")

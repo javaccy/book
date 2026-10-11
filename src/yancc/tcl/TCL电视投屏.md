@@ -407,6 +407,20 @@ tv-view --scrcpy --audio    # 连声音一起抓（这台电视能不能出声�
 - **帧率跟着画面动没动走**：界面在动时录制 8 秒得 241 帧（**30 帧/秒**）；静止的屏保 6 秒只有 65 帧（11 帧/秒）；
   1080p 视频在全黑时 6 秒 11 帧。所以它比 1 帧/秒的截图流强太多，但看片子仍然没戏。
 - 笔记本要装的话：`sudo pacman -S scrcpy`（约 3 MB，含 `android-tools`）。
+- **抓声音必须指定 aac**：这台电视的音频编码器只有 aac/flac（`scrcpy --list-encoders` 实测），
+  而 scrcpy 的默认是 opus → 不加 `--audio-codec=aac` 会直接
+  `Could not create default audio encoder for opus` 挂掉。`tv-view --scrcpy --audio` 已经自动带上 aac
+  （想换用 `--audio-codec flac`）。
+
+### 电视的编解码服务会卡死（2026-10-11 踩到）
+
+跑多了 scrcpy、又用 DLNA 播过视频之后，电视端的编解码服务（Codec2 HAL / `media.swcodec`）会挂：
+`media.codec` 从 `service list` 里消失、`screenrecord` 跑起来卡死、scrcpy 停在
+`Creating encoder by name: …` 然后客户端报 `stream disabled due to connection error`（换 aac/flac、
+换 google/vp8 编码器都一样）。此时 `screencap`、`dumpsys`、`input` 全都正常，只有要 MediaCodec 的挂。
+
+**修法：把电视重启一次**（遥控器电源键关掉再开）。注意它跟「抓不到视频层」是两码事：
+前者是软件卡死、重启就好；后者（1080p 全黑）是 MTK MFE 硬件视频层不走 GPU 合成的硬限制，重启也抓不到。
 
 ### 其它
 
