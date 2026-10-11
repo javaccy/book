@@ -486,17 +486,24 @@ tv-mirror --mode popup   # 换成浮动小窗；--mode full / --full 全屏
   `getprop sys.boot_completed`、`service list` 都吐不出东西，`adb reboot` 也发不进去（超时）。
 - 判定：能连上时 `service list | wc -l` 从正常的 **~196 项掉到 ~48 项**（`input:`/`window:`/
   `activity:` 都没了），`load average` 50+（`system_server` 进程还在，但服务注册表已经空了）。
-- **修法不是 `adb reboot`（发不进去），而是用树莓派发 HDMI-CEC 待机再唤醒**，等价于遥控器关机再开：
+- `adb reboot` 这时**发不进去**。当时是这么恢复的（用树莓派发 CEC 待机 + 唤醒）：
 
   ```bash
   ssh yancc@192.168.144.229 "cec-ctl -d0 --playback -t 0 --standby; sleep 5; cec-ctl -d0 --playback -t 0 --image-view-on"
-  # 可以先用这条确认电视真的进了待机（会回 REPORT_POWER_STATUS: pwr-state: standby）：
-  # ssh yancc@192.168.144.229 'cec-ctl -d0 --playback -t 0 --give-device-power-status'
   ```
 
   实测：发完 standby 后电视立刻断网（`No route to host`），约 10 秒后 adb 自己回来，
   `service list` 恢复 196 项、`screencap` rc=0、scrcpy 正常 —— **不用重启整机（uptime 没归零）**，
   属于「待机→唤醒」把 framework 拉起来了。
+
+  ⚠️ **但别把功劳全算给 CEC**：当天稍后专门复测，发现这台电视**认开机不认关机** ——
+  在健康的电视上，下面三种 CEC 关机写法**全都不动作**（`pwr-state` 一直回 `on`）：
+  定向 `-t 0 --standby`、广播 `-t 15 --standby`、模拟遥控电源键
+  `--user-control-pressed ui-cmd=power`（连 `--user-control-released` 一起发也没用）；
+  把 `hdmi_control_auto_device_off_enabled` 从 0 改成 1 也一样（测完已还原成 0）。
+  所以那次「电视断网进待机」到底是 CEC 关的、还是电视自己崩到 standby 的，**无法区分**；
+  唯一可靠的是**唤醒方向**（`IMAGE_VIEW_ON`，多次验证）。
+  结论：framework 挂死时，远程能做的只剩「CEC 待机兜底试一下」→ 不行就按遥控器。
 
 ### 其它
 
@@ -624,8 +631,14 @@ tv-off.sh status   # 同上（转调 tv-on.sh status）
 `tv-on.sh` 三种状态分别处理：已亮 → 什么都不做；画报屏保（`mWakefulness=Dreaming`，网络通）→ adb 发 `KEYCODE_WAKEUP`；
 整机待机（adb 完全连不上）→ 树莓派 HDMI-CEC。实测：0.3 秒 / 4 秒 / 11 秒。
 
-`tv-off.sh` 发 `KEYCODE_POWER` 进待机，发完等它 adb+ping 都不通才算成功；本来就关着就直接退出（幂等）。
-实测空闲 15 秒、串流中 18 秒（先 `tv-cast off` 断流+恢复分辨率再关机）。
+`tv-off.sh` 发 `KEYCODE_POWER` 进待机，发完等它 adb+ping 都不通才算成功（待机后 adb 的 `get-state` 会一直
+骗人，所以先看 ping 再 `adb disconnect` 清状态）。实测 4.6 秒（比之前的 15 秒快，因为不在这里反复
+`adb connect` 死主机）。
+
+它还有一层 **CEC 待机兜底**：adb 连不上、或者 adb 连着但 `shell` 卡死（电视 framework 挂了，见前面那节）
+时，自动改成让树莓派发 `cec-ctl -d0 --playback -t 0 --standby`，再按 ping+adb 双不通确认；兜底命令可用
+`TCL_CEC_STANDBY_CMD` 覆盖（空字符串=禁用）。⚠️ 但**这台电视认开机不认关机**（三种 CEC 关机写法实测都不动作），
+所以兜底失败是常态，脚本会明确让你去按遥控器 —— 它的价值只在"adb 彻底用不了时的最后一试"。
 
 日志分别在 `~/apps/tv/tv-on.log` 和 `tv-off.log`。
 

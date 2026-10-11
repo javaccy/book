@@ -6,7 +6,7 @@
 |------|------|
 | `tv-cast` | 一键开/关电视上的 Moonlight 串流。adb 驱动电视端自动点击（PcView → 电脑卡片 → AppView 回车 → 恢复串流回车），带前台校验和重试；桌面有 mako 通知 |
 | `tv-on.sh` | **只把电视弄亮**（不碰 Moonlight）。已亮→直接退出；画报屏保→`KEYCODE_WAKEUP`；整机待机→树莓派 HDMI-CEC 唤醒 |
-| `tv-off.sh` | **把电视关到待机**（等于遥控器电源键）。串流中会先正常断开 + 恢复本机分辨率；本来就关着则直接退出 |
+| `tv-off.sh` | **把电视关到待机**（等于遥控器电源键）。串流中会先正常断开 + 恢复本机分辨率；adb 用不了（连不上 / shell 卡死）时自动走树莓派 CEC 待机兜底（这台电视认开机不认关机，兜底常失败） |
 | `tv-mode.sh` | 串流期间把本机屏幕临时切成 16:9（避免电视两侧黑边），结束恢复首选模式 |
 | `tv-show` | **把图片推到电视上全屏显示**（一张 / 多张幻灯片）。走电视自带的 DLNA 渲染器（`com.tcl.MultiScreenInteraction_TV`），不装 App、不用遥控器 |
 | `tv-play` | **在电视上播放本地视频**（电视自己解码，不镜像）。同一套 DLNA 渲染器 + HTTP `Range`，支持暂停/拖动/连播 |
@@ -61,7 +61,7 @@ tv-mirror --audio --audio-codec flac   # 换个音频编码器
 ```
 
 `tv-on.sh` 三种状态实测都通过：已亮 0.3 秒直接退出、画报屏保 4 秒唤醒、整机待机 11 秒经树莓派 CEC 唤醒。
-`tv-off.sh` 空闲时 15 秒关机；串流中 18 秒（先断流、把分辨率从 1920x1080 恢复到 3440x1440，再关机）；电视已经关着则秒退。
+`tv-off.sh` 空闲时约 5 秒关机；串流中会先断流、把分辨率从 1920x1080 恢复到 3440x1440 再关机；adb 用不了时改走 CEC 待机兜底。
 
 `tv-show` / `tv-play` 是 python3 脚本（其余都是 bash），共用 `tv_dlna.py`：本机起一个临时 HTTP 服务
 （带 DLNA 头，视频还支持 `Range`）+ SSDP 找到电视的 MediaRenderer，`SetAVTransportURI` + `Play` 推过去。
@@ -119,6 +119,11 @@ tv-mirror --audio --audio-codec flac   # 换个音频编码器
 - 前提：电视端 `hdmi_control_auto_wakeup_enabled=1`，且机器能免密 ssh 到树莓派
 
 细节、实测数据和排查见文档「HDMI-CEC 远程开机（已实现）」一节。
+
+**注意方向不对称**：CEC 只能可靠地**开机**（`IMAGE_VIEW_ON`，多次验证）。
+**关机不行** —— 2026-10-11 复测定向/广播/模拟遥控电源键三种写法，健康的电视全都不动作
+（`pwr-state` 一直回 `on`，`hdmi_control_auto_device_off_enabled=1` 也一样）。
+所以 `tv-off.sh` 的 CEC 兜底只是"adb 彻底用不了时的最后一试"，失败请按遥控器。
 
 **故意不在 `hyprland.lua` 里绑快捷键**（2026-10-11 定）：电视功能不常用，
 命令行 `tv-cast` / `tv-on.sh` / `tv-off.sh` 足够，不必占用键位。
