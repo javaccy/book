@@ -1,5 +1,18 @@
 # 让 AI Agent（Codex 等）在本机使用 sudo（2026-10-11 方案 A）
 
+> **2026-10-12：两台机器都已装好。**
+>
+> | 机器 | 怎么连 | 文件 |
+> |------|--------|------|
+> | 台式机 `archlinux` | `yancc@192.168.144.230`（本机） | `~/.local/bin/sudo-askpass`(700) + `~/.config/rofi/sudo-askpass.rasi`(600) |
+> | 笔记本 `yancc-arcolinux` | `yancc@note.yancc.com` = `yancc@192.168.144.186` | 同上 |
+>
+> 两台都是 rofi 2.0.0、启动器主题都是 `android_notification`，所以配置一模一样。
+> 笔记本侧实测：从 ssh 里带上 `XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1`
+> 起 `~/.local/bin/sudo-askpass`，密码框正常弹出并回传输入。
+> **注意**：agent 平时是在桌面终端里跑的，`WAYLAND_DISPLAY` 天然就有；只有从 ssh 远程手动跑
+> 才需要自己补这两个变量。
+
 ## 背景
 
 Agent 跑在非交互 shell 里，没有 tty，`sudo` 会直接报 `a password is required`。
@@ -80,6 +93,9 @@ SUDO_ASKPASS=$HOME/.local/bin/sudo-askpass sudo -A sh -c 'cmd1 && cmd2'
   要显式写 `textbox { text-color: ... }` 才生效；`*` 里也要给定颜色变量，否则会继承 rofi 内置
   浅色默认主题（白底黑字）。
 - **密码只在管道里交给 sudo，不落盘**；不要把它贴进对话（会写进 agent 的历史记录）。
+  （这条踩过一次：2026-10-12 在笔记本上验证弹框时，手动输入的密码被 rofi 回显到了 agent 的
+  命令输出里，等于进了会话记录 —— 所以验证时**别真的输密码**，看到框弹出来就够了，
+  或者先输个假的再 Esc。）
 
 ## 验证
 
